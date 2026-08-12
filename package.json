@@ -1,0 +1,12 @@
+{
+  "name": "home-assistant-yaml-source-editor",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "vendor:js-yaml": "node scripts/vendor-js-yaml.mjs"
+  },
+  "dependencies": {
+    "js-yaml": "5.2.2"
+  },
+  "devDependencies": {}
+}
