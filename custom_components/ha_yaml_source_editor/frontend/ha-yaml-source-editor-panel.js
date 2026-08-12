@@ -1,4 +1,10 @@
-import { validateSourceText } from "./source-validation.mjs";
+import { analyzeSourceText, validateSourceText } from "./source-validation.mjs";
+import {
+  canonicalJson,
+  classifySyncState,
+  compareSourceToHa,
+  shortHash,
+} from "./sync-state.mjs";
 
 class HaYamlSourceEditorPanel extends HTMLElement {
   constructor() {
@@ -28,6 +34,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._validationResult = null;
     this._validationError = null;
     this._validationRequestId = 0;
+    this._syncStatus = "No dashboard selected";
+    this._sourceVsHa = "UNAVAILABLE";
+    this._syncNote = null;
+    this._syncError = null;
+    this._sourceTextHash = null;
+    this._sourceSemanticHash = null;
+    this._haSemanticHash = null;
+    this._syncRequestId = 0;
+    this._syncDebounce = null;
   }
 
   set hass(hass) {
@@ -122,6 +137,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceError = null;
     this._sourceRequestId += 1;
     this._clearValidation();
+    this._clearSyncState();
   }
 
   _escapeHtml(value) {
@@ -200,6 +216,21 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._validationRequestId += 1;
   }
 
+  _clearSyncState() {
+    this._syncStatus = this._selectedDashboard ? "Unavailable" : "No dashboard selected";
+    this._sourceVsHa = "UNAVAILABLE";
+    this._syncNote = null;
+    this._syncError = null;
+    this._sourceTextHash = null;
+    this._sourceSemanticHash = null;
+    this._haSemanticHash = null;
+    this._syncRequestId += 1;
+    if (this._syncDebounce) {
+      window.clearTimeout(this._syncDebounce);
+      this._syncDebounce = null;
+    }
+  }
+
   _selectDashboard(dashboard) {
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
@@ -219,6 +250,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._clearValidation();
+    this._clearSyncState();
     this._render();
 
     this._loadDashboardConfig(dashboard, requestId);
@@ -244,6 +276,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       this._config = config;
       this._configStatus = "Loaded";
+      this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._configRequestId) {
         return;
@@ -294,6 +327,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceStatus = "Loaded";
       this._sourceError = null;
       this._clearValidation();
+      this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
         return;
@@ -336,6 +370,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
       this._clearValidation();
+      this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
         return;
@@ -375,6 +410,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._lastSavedSourceText = result.document.source_text;
       this._sourceStatus = "Saved";
       this._sourceError = null;
+      this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
         return;
@@ -465,6 +501,117 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     return { valid: true };
+  }
+
+  _scheduleSyncRefresh() {
+    if (!this._sourceDocument || !this._selectedDashboard) {
+      return;
+    }
+
+    if (this._syncDebounce) {
+      window.clearTimeout(this._syncDebounce);
+    }
+
+    this._syncDebounce = window.setTimeout(() => {
+      this._syncDebounce = null;
+      this._refreshSyncStatus();
+    }, 400);
+  }
+
+  async _refreshSyncStatus({ reloadHa = false } = {}) {
+    if (!this._sourceDocument || !this._selectedDashboard) {
+      this._clearSyncState();
+      this._render();
+      return;
+    }
+
+    const requestId = this._syncRequestId + 1;
+    this._syncRequestId = requestId;
+    this._syncStatus = "Calculating";
+    this._syncError = null;
+    this._render();
+
+    try {
+      let currentHaConfig = this._configStatus === "Loaded" ? this._config : null;
+      if (reloadHa || currentHaConfig == null) {
+        currentHaConfig = await this._readDashboardConfig(this._selectedDashboard);
+        if (requestId !== this._syncRequestId) {
+          return;
+        }
+        this._config = currentHaConfig;
+        this._configStatus = "Loaded";
+      }
+
+      const sourceAnalysis = analyzeSourceText(this._sourceText);
+      const sourceTextHash = await this._hashText(this._sourceText);
+      if (requestId !== this._syncRequestId) {
+        return;
+      }
+
+      let sourceSemanticHash = null;
+      if (sourceAnalysis.validation.valid) {
+        sourceSemanticHash = await this._hashText(
+          canonicalJson(sourceAnalysis.parsedConfig)
+        );
+        if (requestId !== this._syncRequestId) {
+          return;
+        }
+      }
+
+      const haSemanticHash = await this._hashText(canonicalJson(currentHaConfig));
+      if (requestId !== this._syncRequestId) {
+        return;
+      }
+
+      const deploymentBaseline =
+        this._sourceDocument.deployment_baseline ?? null;
+      const syncState = classifySyncState({
+        deploymentBaseline,
+        currentSourceTextHash: sourceTextHash,
+        currentSourceSemanticHash: sourceSemanticHash,
+        currentHaSemanticHash: haSemanticHash,
+        sourceValid: sourceAnalysis.validation.valid,
+      });
+
+      this._sourceTextHash = sourceTextHash;
+      this._sourceSemanticHash = sourceSemanticHash;
+      this._haSemanticHash = haSemanticHash;
+      this._sourceVsHa = compareSourceToHa(sourceSemanticHash, haSemanticHash);
+      this._syncStatus = syncState.status;
+      this._syncNote = syncState.note;
+      this._syncError = null;
+    } catch (err) {
+      if (requestId !== this._syncRequestId) {
+        return;
+      }
+
+      this._syncStatus = "SYNC ERROR";
+      this._sourceVsHa = "UNAVAILABLE";
+      this._syncError = err?.message || "Unable to calculate synchronization status.";
+    }
+
+    this._render();
+  }
+
+  async _hashText(text) {
+    const result = await this._hass.connection.sendMessagePromise({
+      type: "ha_yaml_source_editor/hash/sha256",
+      text,
+    });
+    return result.sha256;
+  }
+
+  async _readDashboardConfig(dashboard) {
+    const message = {
+      type: "lovelace/config",
+    };
+    const targetUrlPath = this._dashboardTargetUrlPath(dashboard);
+
+    if (targetUrlPath != null) {
+      message.url_path = targetUrlPath;
+    }
+
+    return this._hass.connection.sendMessagePromise(message);
   }
 
   _renderDashboardList(dashboards) {
@@ -738,6 +885,66 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderSyncSection() {
+    const statusClass = this._syncStatus === "SYNC ERROR" ? " error" : "";
+    const refreshDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._syncStatus === "Calculating"
+        ? "disabled"
+        : "";
+
+    return `
+      <section class="section">
+        <div class="section-header">
+          <h2>Synchronization</h2>
+          <button type="button" id="refresh-sync-status" ${refreshDisabled}>
+            Refresh Status
+          </button>
+        </div>
+        <p class="state">
+          Source vs HA compares current semantic configuration. It does not mean
+          the dashboard was deployed by HA YAML Source Editor.
+        </p>
+        <dl class="sync-status">
+          <dt>Deployment status</dt>
+          <dd class="${statusClass.trim()}">${this._escapeHtml(this._syncStatus)}</dd>
+          <dt>Source vs HA</dt>
+          <dd>${this._escapeHtml(this._sourceVsHa)}</dd>
+          <dt>Source text</dt>
+          <dd title="${this._escapeHtml(this._sourceTextHash ?? "")}">${this._escapeHtml(
+            shortHash(this._sourceTextHash)
+          )}</dd>
+          <dt>Source semantics</dt>
+          <dd title="${this._escapeHtml(this._sourceSemanticHash ?? "")}">${this._escapeHtml(
+            shortHash(this._sourceSemanticHash)
+          )}</dd>
+          <dt>Current HA</dt>
+          <dd title="${this._escapeHtml(this._haSemanticHash ?? "")}">${this._escapeHtml(
+            shortHash(this._haSemanticHash)
+          )}</dd>
+        </dl>
+        ${this._renderSyncMessage()}
+      </section>
+    `;
+  }
+
+  _renderSyncMessage() {
+    if (this._syncStatus === "Calculating") {
+      return `<p class="state">Calculating hashes...</p>`;
+    }
+
+    if (this._syncError) {
+      return `<p class="state error">${this._escapeHtml(this._syncError)}</p>`;
+    }
+
+    if (this._syncNote) {
+      return `<p class="state">${this._escapeHtml(this._syncNote)}</p>`;
+    }
+
+    return "";
+  }
+
   _renderUnsupportedList(dashboards) {
     if (
       this._dashboardLoading ||
@@ -971,6 +1178,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .sync-status {
+          margin: 16px 0;
+        }
+
         .config-viewer {
           display: grid;
           gap: 12px;
@@ -1079,6 +1290,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ${this._renderConfigurationSection()}
         ${this._renderSourceDocumentSection()}
         ${this._renderValidationSection()}
+        ${this._renderSyncSection()}
       </section>
     `;
 
@@ -1110,12 +1322,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .getElementById("validate-source-document")
       ?.addEventListener("click", () => this._validateSourceDocument());
 
+    this.shadowRoot
+      .getElementById("refresh-sync-status")
+      ?.addEventListener("click", () => this._refreshSyncStatus({ reloadHa: true }));
+
     const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
     if (sourceTextarea) {
       sourceTextarea.value = this._sourceText;
       sourceTextarea.addEventListener("input", (event) => {
         this._sourceText = event.target.value;
         this._clearValidation();
+        this._scheduleSyncRefresh();
         const statusValue = this.shadowRoot.getElementById("source-status-value");
         const validationStatus = this.shadowRoot.getElementById(
           "validation-status-value"
