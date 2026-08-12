@@ -10,6 +10,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._dashboardLoading = false;
     this._dashboards = [];
     this._dashboardError = null;
+    this._selectedDashboardKey = null;
+    this._selectedDashboard = null;
+    this._configStatus = "No dashboard selected";
+    this._config = null;
+    this._configError = null;
+    this._configRequestId = 0;
   }
 
   set hass(hass) {
@@ -69,14 +75,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         type: "lovelace/dashboards/list",
       });
 
-      const panels = await this._hass.connection.sendMessagePromise({
-        type: "get_panels",
-      });
-
-      this._dashboards = this._withDefaultDashboard(
-        Array.isArray(dashboards) ? dashboards : [],
-        panels
-      );
+      this._dashboards = Array.isArray(dashboards) ? dashboards : [];
       this._dashboardStatus = "Connected";
     } catch (_err) {
       this._dashboards = [];
@@ -89,7 +88,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshDashboards() {
+    this._clearSelectedDashboard();
     this._loadDashboards({ force: true });
+  }
+
+  _clearSelectedDashboard() {
+    this._selectedDashboardKey = null;
+    this._selectedDashboard = null;
+    this._configStatus = "No dashboard selected";
+    this._config = null;
+    this._configError = null;
+    this._configRequestId += 1;
   }
 
   _escapeHtml(value) {
@@ -105,58 +114,67 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return String(mode ?? "unknown").toUpperCase();
   }
 
-  _canonicalPath(path) {
-    return String(path ?? "").replace(/^\/+|\/+$/g, "");
-  }
-
-  _isDefaultLovelaceDashboard(dashboard) {
-    const dashboardPath = this._canonicalPath(
-      dashboard.display_url_path ?? dashboard.url_path
-    );
-
-    return (
-      dashboard.is_default === true ||
-      dashboard.id === "lovelace" ||
-      dashboardPath === "lovelace"
-    );
-  }
-
-  _withDefaultDashboard(dashboards, panels) {
-    const panel = panels?.lovelace;
-    const panelMode = panel?.config?.mode;
-    const isBuiltInDefaultPanel =
-      panel?.component_name === "lovelace" &&
-      this._canonicalPath(panel?.url_path) === "lovelace" &&
-      panelMode == null;
-    const isStorageDefaultPanel =
-      panelMode === "storage" || isBuiltInDefaultPanel;
-
-    if (
-      !isStorageDefaultPanel ||
-      dashboards.some((dashboard) => this._isDefaultLovelaceDashboard(dashboard))
-    ) {
-      return dashboards;
-    }
-
-    return [
-      {
-        title: panel.title || "Overview",
-        display_url_path: "lovelace",
-        target_url_path: null,
-        mode: "storage",
-        is_default: true,
-      },
-      ...dashboards,
-    ];
-  }
-
   _dashboardTitle(dashboard) {
     return dashboard.title || dashboard.url_path || dashboard.id || "Untitled";
   }
 
   _dashboardPath(dashboard) {
-    const urlPath = dashboard.display_url_path ?? dashboard.url_path ?? "";
+    const urlPath = dashboard.url_path ?? "";
     return urlPath.startsWith("/") ? urlPath : `/${urlPath}`;
+  }
+
+  _dashboardKey(dashboard) {
+    return `dashboard:${
+      dashboard.url_path ??
+      dashboard.id ??
+      dashboard.title ??
+      "unknown"
+    }`;
+  }
+
+  _dashboardTargetUrlPath(dashboard) {
+    return dashboard.url_path;
+  }
+
+  async _selectDashboard(dashboard) {
+    const requestId = this._configRequestId + 1;
+    this._configRequestId = requestId;
+    this._selectedDashboardKey = this._dashboardKey(dashboard);
+    this._selectedDashboard = dashboard;
+    this._configStatus = "Loading";
+    this._config = null;
+    this._configError = null;
+    this._render();
+
+    const message = {
+      type: "lovelace/config",
+    };
+    const targetUrlPath = this._dashboardTargetUrlPath(dashboard);
+
+    if (targetUrlPath != null) {
+      message.url_path = targetUrlPath;
+    }
+
+    try {
+      const config = await this._hass.connection.sendMessagePromise(message);
+
+      if (requestId !== this._configRequestId) {
+        return;
+      }
+
+      this._config = config;
+      this._configStatus = "Loaded";
+    } catch (err) {
+      if (requestId !== this._configRequestId) {
+        return;
+      }
+
+      this._config = null;
+      this._configStatus = "Error";
+      this._configError = err?.message || "Unable to read dashboard configuration.";
+    }
+
+    this._render();
   }
 
   _renderDashboardList(dashboards) {
@@ -175,27 +193,88 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return `
       <ul class="dashboard-list">
         ${dashboards
-          .map(
-            (dashboard) => `
+          .map((dashboard) => {
+            const dashboardKey = this._dashboardKey(dashboard);
+            const selectedClass =
+              dashboardKey === this._selectedDashboardKey ? " selected" : "";
+
+            return `
               <li>
-                <div class="dashboard-title">${this._escapeHtml(
-                  this._dashboardTitle(dashboard)
-                )}${
-                  dashboard.is_default
-                    ? '<span class="badge">Default</span>'
-                    : ""
-                }</div>
-                <div class="dashboard-meta">
-                  <span>${this._escapeHtml(this._dashboardPath(dashboard))}</span>
-                  <span class="mode">${this._escapeHtml(
-                    this._formatMode(dashboard.mode)
-                  )}</span>
-                </div>
+                <button
+                  type="button"
+                  class="dashboard-card${selectedClass}"
+                  data-dashboard-key="${this._escapeHtml(dashboardKey)}"
+                >
+                  <div class="dashboard-title">${this._escapeHtml(
+                    this._dashboardTitle(dashboard)
+                  )}</div>
+                  <div class="dashboard-meta">
+                    <span>${this._escapeHtml(this._dashboardPath(dashboard))}</span>
+                    <span class="mode">${this._escapeHtml(
+                      this._formatMode(dashboard.mode)
+                    )}</span>
+                  </div>
+                </button>
               </li>
-            `
-          )
+            `;
+          })
           .join("")}
       </ul>
+    `;
+  }
+
+  _renderConfigurationSection() {
+    const dashboard = this._selectedDashboard;
+    const statusClass = this._configStatus === "Error" ? " error" : "";
+
+    return `
+      <section class="section">
+        <h2>Dashboard configuration</h2>
+        <dl class="config-status">
+          <dt>Selected dashboard</dt>
+          <dd>${
+            dashboard
+              ? this._escapeHtml(this._dashboardTitle(dashboard))
+              : "None"
+          }</dd>
+          <dt>Display path</dt>
+          <dd>${
+            dashboard ? this._escapeHtml(this._dashboardPath(dashboard)) : "-"
+          }</dd>
+          <dt>Read status</dt>
+          <dd class="${statusClass.trim()}">${this._escapeHtml(
+            this._configStatus
+          )}</dd>
+        </dl>
+        ${this._renderConfigurationBody()}
+      </section>
+    `;
+  }
+
+  _renderConfigurationBody() {
+    if (this._configStatus === "No dashboard selected") {
+      return `<p class="state">No dashboard selected.</p>`;
+    }
+
+    if (this._configStatus === "Loading") {
+      return `<p class="state">Loading dashboard configuration...</p>`;
+    }
+
+    if (this._configStatus === "Error") {
+      return `<p class="state error">${this._escapeHtml(
+        this._configError || "Unable to read dashboard configuration."
+      )}</p>`;
+    }
+
+    return `
+      <div class="config-viewer">
+        <p class="state">
+          Current Home Assistant configuration (read-only). This is Home
+          Assistant's normalized representation. It is not the lossless source
+          document.
+        </p>
+        <pre id="dashboard-config-json"></pre>
+      </div>
     `;
   }
 
@@ -216,13 +295,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
             .map(
               (dashboard) => `
                 <li>
-                  <div class="dashboard-title">${this._escapeHtml(
-                    this._dashboardTitle(dashboard)
-                  )}</div>
-                  <div class="dashboard-meta">
-                    <span class="mode">${this._escapeHtml(
-                      this._formatMode(dashboard.mode)
-                    )}</span>
+                  <div class="unsupported-card">
+                    <div class="dashboard-title">${this._escapeHtml(
+                      this._dashboardTitle(dashboard)
+                    )}</div>
+                    <div class="dashboard-meta">
+                      <span class="mode">${this._escapeHtml(
+                        this._formatMode(dashboard.mode)
+                      )}</span>
+                    </div>
                   </div>
                 </li>
               `
@@ -349,10 +430,36 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
 
         .dashboard-list li {
-          padding: 16px;
+          padding: 0;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
           background: var(--card-background-color);
+          overflow: hidden;
+        }
+
+        .dashboard-card {
+          display: block;
+          width: 100%;
+          min-height: 0;
+          padding: 16px;
+          border: 0;
+          border-radius: 0;
+          color: var(--primary-text-color);
+          background: transparent;
+          text-align: left;
+        }
+
+        .dashboard-card:hover {
+          background: var(--secondary-background-color);
+        }
+
+        .dashboard-card.selected {
+          box-shadow: inset 4px 0 0 var(--primary-color);
+          background: var(--secondary-background-color);
+        }
+
+        .unsupported-card {
+          padding: 16px;
         }
 
         .dashboard-title {
@@ -379,18 +486,6 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           letter-spacing: 0;
         }
 
-        .badge {
-          display: inline-flex;
-          align-items: center;
-          min-height: 20px;
-          padding: 0 8px;
-          border-radius: 999px;
-          color: var(--primary-color);
-          background: var(--secondary-background-color);
-          font-size: 12px;
-          font-weight: 500;
-        }
-
         .state {
           margin: 0;
           padding: 16px;
@@ -402,6 +497,31 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .error {
           color: var(--error-color);
+        }
+
+        .config-status {
+          margin-bottom: 16px;
+        }
+
+        .config-viewer {
+          display: grid;
+          gap: 12px;
+        }
+
+        pre {
+          margin: 0;
+          padding: 16px;
+          max-height: 520px;
+          overflow: auto;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          color: var(--primary-text-color);
+          background: var(--card-background-color);
+          font-family: var(--code-font-family, monospace);
+          font-size: 13px;
+          line-height: 1.5;
+          white-space: pre-wrap;
+          overflow-wrap: anywhere;
         }
 
         @media (max-width: 600px) {
@@ -452,12 +572,30 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           ${this._renderDashboardList(storageDashboards)}
         </section>
         ${this._renderUnsupportedList(unsupportedDashboards)}
+        ${this._renderConfigurationSection()}
       </section>
     `;
 
     this.shadowRoot
       .getElementById("refresh-dashboards")
       ?.addEventListener("click", () => this._refreshDashboards());
+
+    for (const button of this.shadowRoot.querySelectorAll(".dashboard-card")) {
+      button.addEventListener("click", () => {
+        const dashboard = storageDashboards.find(
+          (item) => this._dashboardKey(item) === button.dataset.dashboardKey
+        );
+
+        if (dashboard) {
+          this._selectDashboard(dashboard);
+        }
+      });
+    }
+
+    const configBlock = this.shadowRoot.getElementById("dashboard-config-json");
+    if (configBlock && this._configStatus === "Loaded") {
+      configBlock.textContent = JSON.stringify(this._config, null, 2);
+    }
   }
 }
 
