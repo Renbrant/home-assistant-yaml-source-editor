@@ -75,7 +75,7 @@ class SourceDocumentStore:
         """Return a full Source Document, including stored source text."""
         data = await self._async_get_data()
         if document := data["documents"].get(document_id):
-            return deepcopy(document)
+            return self._document_with_defaults(document)
         raise DocumentNotFoundError("Source Document not found.")
 
     async def async_create_document(
@@ -88,7 +88,7 @@ class SourceDocumentStore:
             data = await self._async_get_data_unlocked()
             existing = self._find_document_for_target(data, target_type, url_path)
             if existing is not None:
-                raise DocumentAlreadyExistsError(deepcopy(existing))
+                raise DocumentAlreadyExistsError(self._document_with_defaults(existing))
 
             now = self._now()
             document_id = str(uuid4())
@@ -100,12 +100,13 @@ class SourceDocumentStore:
                     "url_path": url_path,
                 },
                 "source_text": "",
+                "deployment_baseline": None,
                 "created_at": now,
                 "updated_at": now,
             }
             data["documents"][document_id] = document
             await self._store.async_save(data)
-            return deepcopy(document)
+            return self._document_with_defaults(document)
 
     async def async_save_source(
         self, document_id: str, source_text: str
@@ -122,7 +123,7 @@ class SourceDocumentStore:
             document["source_text"] = source_text
             document["updated_at"] = self._now()
             await self._store.async_save(data)
-            return deepcopy(document)
+            return self._document_with_defaults(document)
 
     async def _async_get_data(self) -> dict[str, Any]:
         """Return loaded store data."""
@@ -142,9 +143,16 @@ class SourceDocumentStore:
             "document_id": document["document_id"],
             "name": document["name"],
             "target": deepcopy(document["target"]),
+            "has_deployment_baseline": document.get("deployment_baseline") is not None,
             "created_at": document["created_at"],
             "updated_at": document["updated_at"],
         }
+
+    def _document_with_defaults(self, document: dict[str, Any]) -> dict[str, Any]:
+        """Return a document with additive fields defaulted without storing them."""
+        result = deepcopy(document)
+        result.setdefault("deployment_baseline", None)
+        return result
 
     def _find_document_for_target(
         self, data: dict[str, Any], target_type: str, url_path: str

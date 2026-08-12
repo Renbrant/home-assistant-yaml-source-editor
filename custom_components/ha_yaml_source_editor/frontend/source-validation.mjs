@@ -8,8 +8,12 @@ const PARSE_OPTIONS = {
 };
 
 export function validateSourceText(sourceText) {
+  return analyzeSourceText(sourceText).validation;
+}
+
+export function analyzeSourceText(sourceText) {
   if (sourceText.length === 0) {
-    return invalid("yaml", "Source YAML is empty.");
+    return analysis(invalid("yaml", "Source YAML is empty."));
   }
 
   let parsed;
@@ -17,33 +21,36 @@ export function validateSourceText(sourceText) {
   try {
     parsed = load(sourceText, PARSE_OPTIONS);
   } catch (err) {
-    return syntaxErrorResult(err);
+    return analysis(syntaxErrorResult(err));
   }
 
   if (parsed == null) {
-    return invalid("yaml", "Source YAML is empty.");
+    return analysis(invalid("yaml", "Source YAML is empty."));
   }
 
   const wireResult = validateWireCompatible(parsed);
   if (!wireResult.valid) {
-    return wireResult;
+    return analysis(wireResult);
   }
 
   const structureResult = validateLovelaceStructure(parsed);
   if (!structureResult.valid) {
-    return structureResult;
+    return analysis(structureResult);
   }
 
   return {
-    valid: true,
-    stage: "ok",
-    message: "Source YAML is valid.",
-    details: [
-      { stage: "yaml", message: "OK" },
-      { stage: "wire", message: "OK" },
-      { stage: "lovelace", message: "OK" },
-    ],
-    summary: structureResult.summary,
+    validation: {
+      valid: true,
+      stage: "ok",
+      message: "Source YAML is valid.",
+      details: [
+        { stage: "yaml", message: "OK" },
+        { stage: "wire", message: "OK" },
+        { stage: "lovelace", message: "OK" },
+      ],
+      summary: structureResult.summary,
+    },
+    parsedConfig: parsed,
   };
 }
 
@@ -217,6 +224,13 @@ function invalid(stage, message, extra = {}) {
     stage,
     message,
     ...extra,
+  };
+}
+
+function analysis(validation) {
+  return {
+    validation,
+    parsedConfig: null,
   };
 }
 

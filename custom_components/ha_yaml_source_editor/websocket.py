@@ -13,12 +13,14 @@ from homeassistant.core import HomeAssistant, callback
 from .const import (
     DOCUMENT_TARGET_TYPE_LOVELACE_STORAGE_DASHBOARD,
     DOMAIN,
+    MAX_HASH_TEXT_BYTES,
     NAME,
     VERSION,
     WS_TYPE_DOCUMENTS_CREATE,
     WS_TYPE_DOCUMENTS_GET,
     WS_TYPE_DOCUMENTS_LIST,
     WS_TYPE_DOCUMENTS_SAVE_SOURCE,
+    WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
 )
 from .document_store import (
@@ -29,6 +31,7 @@ from .document_store import (
     SourceDocumentStore,
     SourceTextTooLargeError,
 )
+from .hashing import sha256_text
 
 
 def async_register_commands(hass: HomeAssistant) -> None:
@@ -38,6 +41,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_get)
     websocket_api.async_register_command(hass, websocket_documents_create)
     websocket_api.async_register_command(hass, websocket_documents_save_source)
+    websocket_api.async_register_command(hass, websocket_hash_sha256)
 
 
 def _document_store(hass: HomeAssistant) -> SourceDocumentStore:
@@ -99,6 +103,31 @@ async def websocket_documents_get(
         return
 
     connection.send_result(msg["id"], {"document": document})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_HASH_SHA256,
+        vol.Required("text"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_hash_sha256(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return a SHA-256 digest for supplied text without storing it."""
+    text = msg["text"]
+    if len(text.encode("utf-8")) > MAX_HASH_TEXT_BYTES:
+        connection.send_error(msg["id"], "text_too_large", "Hash text exceeds the 8 MiB limit.")
+        return
+
+    connection.send_result(
+        msg["id"],
+        {"sha256": sha256_text(text)},
+    )
 
 
 @websocket_api.require_admin
