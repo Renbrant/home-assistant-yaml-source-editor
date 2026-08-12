@@ -1,0 +1,12 @@
+{
+  "config": {
+    "abort": {
+      "already_configured": "HA YAML Source Editor is already configured."
+    },
+    "step": {
+      "user": {
+        "title": "HA YAML Source Editor"
+      }
+    }
+  }
+}
