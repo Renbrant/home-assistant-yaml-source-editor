@@ -16,6 +16,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._config = null;
     this._configError = null;
     this._configRequestId = 0;
+    this._sourceDocument = null;
+    this._sourceStatus = "No dashboard selected";
+    this._sourceText = "";
+    this._lastSavedSourceText = "";
+    this._sourceError = null;
+    this._sourceRequestId = 0;
   }
 
   set hass(hass) {
@@ -88,6 +94,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshDashboards() {
+    if (!this._confirmDiscardUnsavedChanges()) {
+      return;
+    }
+
     this._clearSelectedDashboard();
     this._loadDashboards({ force: true });
   }
@@ -99,6 +109,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._config = null;
     this._configError = null;
     this._configRequestId += 1;
+    this._sourceDocument = null;
+    this._sourceStatus = "No dashboard selected";
+    this._sourceText = "";
+    this._lastSavedSourceText = "";
+    this._sourceError = null;
+    this._sourceRequestId += 1;
   }
 
   _escapeHtml(value) {
@@ -136,16 +152,65 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return dashboard.url_path;
   }
 
-  async _selectDashboard(dashboard) {
+  _targetForDashboard(dashboard) {
+    return {
+      type: "lovelace_storage_dashboard",
+      url_path: this._dashboardTargetUrlPath(dashboard),
+    };
+  }
+
+  _documentMatchesDashboard(document, dashboard) {
+    const target = document?.target;
+    const dashboardTarget = this._targetForDashboard(dashboard);
+
+    return (
+      target?.type === dashboardTarget.type &&
+      target?.url_path === dashboardTarget.url_path
+    );
+  }
+
+  _hasUnsavedSourceChanges() {
+    return (
+      this._sourceDocument !== null &&
+      this._sourceText !== this._lastSavedSourceText
+    );
+  }
+
+  _confirmDiscardUnsavedChanges() {
+    if (!this._hasUnsavedSourceChanges()) {
+      return true;
+    }
+
+    return window.confirm(
+      "This Source YAML has unsaved changes. Discard them and continue?"
+    );
+  }
+
+  _selectDashboard(dashboard) {
+    if (!this._confirmDiscardUnsavedChanges()) {
+      return;
+    }
+
     const requestId = this._configRequestId + 1;
     this._configRequestId = requestId;
+    this._sourceRequestId += 1;
     this._selectedDashboardKey = this._dashboardKey(dashboard);
     this._selectedDashboard = dashboard;
     this._configStatus = "Loading";
     this._config = null;
     this._configError = null;
+    this._sourceDocument = null;
+    this._sourceStatus = "Checking";
+    this._sourceText = "";
+    this._lastSavedSourceText = "";
+    this._sourceError = null;
     this._render();
 
+    this._loadDashboardConfig(dashboard, requestId);
+    this._loadSourceDocument(dashboard, this._sourceRequestId);
+  }
+
+  async _loadDashboardConfig(dashboard, requestId) {
     const message = {
       type: "lovelace/config",
     };
@@ -172,6 +237,134 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._config = null;
       this._configStatus = "Error";
       this._configError = err?.message || "Unable to read dashboard configuration.";
+    }
+
+    this._render();
+  }
+
+  async _loadSourceDocument(dashboard, requestId) {
+    try {
+      const listResult = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/list",
+      });
+      const metadata = listResult.documents?.find((document) =>
+        this._documentMatchesDashboard(document, dashboard)
+      );
+
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      if (!metadata) {
+        this._sourceStatus = "No document";
+        this._render();
+        return;
+      }
+
+      this._sourceStatus = "Loading";
+      this._render();
+
+      const getResult = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/get",
+        document_id: metadata.document_id,
+      });
+
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      this._sourceDocument = getResult.document;
+      this._sourceText = getResult.document.source_text;
+      this._lastSavedSourceText = getResult.document.source_text;
+      this._sourceStatus = "Loaded";
+      this._sourceError = null;
+    } catch (err) {
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      this._sourceDocument = null;
+      this._sourceStatus = "Error";
+      this._sourceError = err?.message || "Unable to load Source Document.";
+    }
+
+    this._render();
+  }
+
+  async _createSourceDocument() {
+    if (!this._selectedDashboard || this._sourceStatus === "Creating") {
+      return;
+    }
+
+    const requestId = this._sourceRequestId + 1;
+    this._sourceRequestId = requestId;
+    this._sourceStatus = "Creating";
+    this._sourceError = null;
+    this._render();
+
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/create",
+        name: this._dashboardTitle(this._selectedDashboard),
+        target: this._targetForDashboard(this._selectedDashboard),
+      });
+
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      const document = result.document;
+      this._sourceDocument = document;
+      this._sourceText = document.source_text ?? "";
+      this._lastSavedSourceText = document.source_text ?? "";
+      this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
+      this._sourceError = null;
+    } catch (err) {
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      this._sourceStatus = "Error";
+      this._sourceError = err?.message || "Unable to create Source Document.";
+    }
+
+    this._render();
+  }
+
+  async _saveSourceDocument() {
+    if (!this._sourceDocument || this._sourceStatus === "Saving") {
+      return;
+    }
+
+    const requestId = this._sourceRequestId + 1;
+    this._sourceRequestId = requestId;
+    this._sourceStatus = "Saving";
+    this._sourceError = null;
+    this._render();
+
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/save_source",
+        document_id: this._sourceDocument.document_id,
+        source_text: this._sourceText,
+      });
+
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      this._sourceDocument = result.document;
+      this._sourceText = result.document.source_text;
+      this._lastSavedSourceText = result.document.source_text;
+      this._sourceStatus = "Saved";
+      this._sourceError = null;
+    } catch (err) {
+      if (requestId !== this._sourceRequestId) {
+        return;
+      }
+
+      this._sourceStatus = "Error";
+      this._sourceError = err?.message || "Unable to save Source Document.";
     }
 
     this._render();
@@ -274,6 +467,91 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           document.
         </p>
         <pre id="dashboard-config-json"></pre>
+      </div>
+    `;
+  }
+
+  _renderSourceDocumentSection() {
+    const dashboard = this._selectedDashboard;
+    const sourceStatus =
+      this._sourceStatus === "Error" ||
+      this._sourceStatus === "Saving" ||
+      this._sourceStatus === "Saved"
+        ? this._sourceStatus
+        : this._hasUnsavedSourceChanges()
+          ? "Unsaved changes"
+          : this._sourceStatus;
+    const statusClass = this._sourceStatus === "Error" ? " error" : "";
+
+    return `
+      <section class="section">
+        <h2>Source document</h2>
+        <dl class="source-status">
+          <dt>Target</dt>
+          <dd>${
+            dashboard
+              ? `Lovelace Storage Dashboard ${this._escapeHtml(
+                  this._dashboardPath(dashboard)
+                )}`
+              : "-"
+          }</dd>
+          <dt>Source status</dt>
+          <dd id="source-status-value" class="${statusClass.trim()}">${this._escapeHtml(sourceStatus)}</dd>
+        </dl>
+        ${this._renderSourceDocumentBody()}
+      </section>
+    `;
+  }
+
+  _renderSourceDocumentBody() {
+    if (!this._selectedDashboard) {
+      return `<p class="state">Select a Storage Mode dashboard to manage its Source Document.</p>`;
+    }
+
+    if (this._sourceStatus === "Checking" || this._sourceStatus === "Loading") {
+      return `<p class="state">Loading Source Document...</p>`;
+    }
+
+    if (this._sourceStatus === "Creating") {
+      return `<p class="state">Creating Source Document...</p>`;
+    }
+
+    if (this._sourceStatus === "Error") {
+      return `<p class="state error">${this._escapeHtml(
+        this._sourceError || "Unable to load Source Document."
+      )}</p>`;
+    }
+
+    if (this._sourceStatus === "No document") {
+      return `
+        <div class="source-actions">
+          <p class="state">No source document exists for this dashboard.</p>
+          <button type="button" id="create-source-document">
+            Create Source Document
+          </button>
+        </div>
+      `;
+    }
+
+    const saveDisabled =
+      this._sourceStatus === "Saving" || !this._hasUnsavedSourceChanges()
+        ? "disabled"
+        : "";
+
+    return `
+      <div class="source-editor">
+        <label for="source-yaml">Source YAML</label>
+        <p class="state">
+          This Source YAML is stored as the editor text, using LF newlines in
+          v0.1. Saving it does not modify Home Assistant's Lovelace
+          configuration.
+        </p>
+        <textarea id="source-yaml" spellcheck="false"></textarea>
+        <div class="source-actions">
+          <button type="button" id="save-source-document" ${saveDisabled}>
+            Save Source
+          </button>
+        </div>
       </div>
     `;
   }
@@ -503,9 +781,45 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .source-status {
+          margin-bottom: 16px;
+        }
+
         .config-viewer {
           display: grid;
           gap: 12px;
+        }
+
+        .source-editor,
+        .source-actions {
+          display: grid;
+          gap: 12px;
+        }
+
+        label {
+          color: var(--primary-text-color);
+          font-size: 16px;
+          font-weight: 500;
+        }
+
+        textarea {
+          width: 100%;
+          min-height: 320px;
+          box-sizing: border-box;
+          resize: vertical;
+          padding: 16px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          color: var(--primary-text-color);
+          background: var(--card-background-color);
+          font-family: var(--code-font-family, monospace);
+          font-size: 13px;
+          line-height: 1.5;
+        }
+
+        textarea:focus {
+          outline: 2px solid var(--primary-color);
+          outline-offset: 2px;
         }
 
         pre {
@@ -573,6 +887,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         </section>
         ${this._renderUnsupportedList(unsupportedDashboards)}
         ${this._renderConfigurationSection()}
+        ${this._renderSourceDocumentSection()}
       </section>
     `;
 
@@ -588,6 +903,34 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         if (dashboard) {
           this._selectDashboard(dashboard);
+        }
+      });
+    }
+
+    this.shadowRoot
+      .getElementById("create-source-document")
+      ?.addEventListener("click", () => this._createSourceDocument());
+
+    this.shadowRoot
+      .getElementById("save-source-document")
+      ?.addEventListener("click", () => this._saveSourceDocument());
+
+    const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
+    if (sourceTextarea) {
+      sourceTextarea.value = this._sourceText;
+      sourceTextarea.addEventListener("input", (event) => {
+        this._sourceText = event.target.value;
+        const statusValue = this.shadowRoot.getElementById("source-status-value");
+        const saveButton = this.shadowRoot.getElementById("save-source-document");
+
+        if (statusValue) {
+          statusValue.textContent = this._hasUnsavedSourceChanges()
+            ? "Unsaved changes"
+            : this._sourceStatus;
+        }
+
+        if (saveButton) {
+          saveButton.disabled = !this._hasUnsavedSourceChanges();
         }
       });
     }
