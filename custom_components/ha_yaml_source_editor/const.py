@@ -11,3 +11,12 @@ PANEL_MODULE_URL = f"{PANEL_STATIC_PATH}/ha-yaml-source-editor-panel.js"
 PANEL_ICON = "mdi:file-code-outline"
 
 WS_TYPE_STATUS = f"{DOMAIN}/status"
+WS_TYPE_DOCUMENTS_LIST = f"{DOMAIN}/documents/list"
+WS_TYPE_DOCUMENTS_GET = f"{DOMAIN}/documents/get"
+WS_TYPE_DOCUMENTS_CREATE = f"{DOMAIN}/documents/create"
+WS_TYPE_DOCUMENTS_SAVE_SOURCE = f"{DOMAIN}/documents/save_source"
+
+DOCUMENT_STORAGE_KEY = f"{DOMAIN}.documents"
+DOCUMENT_STORAGE_VERSION = 1
+DOCUMENT_TARGET_TYPE_LOVELACE_STORAGE_DASHBOARD = "lovelace_storage_dashboard"
+MAX_SOURCE_TEXT_BYTES = 2 * 1024 * 1024

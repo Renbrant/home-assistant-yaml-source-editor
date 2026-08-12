@@ -5,13 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import voluptuous as vol
-
-from homeassistant.components import frontend, panel_custom, websocket_api
+from homeassistant.components import frontend, panel_custom
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import __version__ as HA_VERSION
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
 
 from .const import (
@@ -22,36 +19,18 @@ from .const import (
     PANEL_STATIC_PATH,
     PANEL_URL_PATH,
     PANEL_WEB_COMPONENT,
-    VERSION,
-    WS_TYPE_STATUS,
 )
+from .document_store import SourceDocumentStore
+from .websocket import async_register_commands
 
 type HaYamlSourceEditorConfigEntry = ConfigEntry[dict[str, Any]]
 
 
-@callback
-@websocket_api.require_admin
-@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_STATUS})
-def websocket_status(
-    hass: HomeAssistant,
-    connection: websocket_api.ActiveConnection,
-    msg: dict[str, Any],
-) -> None:
-    """Return minimal integration status."""
-    connection.send_result(
-        msg["id"],
-        {
-            "loaded": True,
-            "integration_name": NAME,
-            "integration_version": VERSION,
-            "home_assistant_version": HA_VERSION,
-        },
-    )
-
-
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up process-level HA YAML Source Editor resources."""
-    websocket_api.async_register_command(hass, websocket_status)
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN]["document_store"] = SourceDocumentStore(hass)
+    async_register_commands(hass)
 
     frontend_path = Path(__file__).parent / "frontend"
     await hass.http.async_register_static_paths(
