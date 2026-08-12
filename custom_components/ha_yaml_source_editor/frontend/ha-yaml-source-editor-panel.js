@@ -1,3 +1,5 @@
+import { validateSourceText } from "./source-validation.mjs";
+
 class HaYamlSourceEditorPanel extends HTMLElement {
   constructor() {
     super();
@@ -22,6 +24,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._sourceRequestId = 0;
+    this._validationStatus = "Not validated";
+    this._validationResult = null;
+    this._validationError = null;
+    this._validationRequestId = 0;
   }
 
   set hass(hass) {
@@ -115,6 +121,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._sourceRequestId += 1;
+    this._clearValidation();
   }
 
   _escapeHtml(value) {
@@ -186,6 +193,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     );
   }
 
+  _clearValidation() {
+    this._validationStatus = "Not validated";
+    this._validationResult = null;
+    this._validationError = null;
+    this._validationRequestId += 1;
+  }
+
   _selectDashboard(dashboard) {
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
@@ -204,6 +218,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceText = "";
     this._lastSavedSourceText = "";
     this._sourceError = null;
+    this._clearValidation();
     this._render();
 
     this._loadDashboardConfig(dashboard, requestId);
@@ -278,6 +293,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._lastSavedSourceText = getResult.document.source_text;
       this._sourceStatus = "Loaded";
       this._sourceError = null;
+      this._clearValidation();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
         return;
@@ -319,6 +335,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._lastSavedSourceText = document.source_text ?? "";
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
+      this._clearValidation();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
         return;
@@ -368,6 +385,86 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     this._render();
+  }
+
+  async _validateSourceDocument() {
+    if (
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._validationStatus === "Validating"
+    ) {
+      return;
+    }
+
+    const requestId = this._validationRequestId + 1;
+    this._validationRequestId = requestId;
+    this._validationStatus = "Validating";
+    this._validationResult = null;
+    this._validationError = null;
+    this._render();
+
+    try {
+      const targetResult = await this._validateSelectedTarget();
+      if (requestId !== this._validationRequestId) {
+        return;
+      }
+
+      if (!targetResult.valid) {
+        this._validationStatus = "Invalid";
+        this._validationResult = targetResult;
+        this._render();
+        return;
+      }
+    } catch (err) {
+      if (requestId !== this._validationRequestId) {
+        return;
+      }
+
+      this._validationStatus = "Error";
+      this._validationError =
+        err?.message || "Unable to verify the selected target dashboard.";
+      this._render();
+      return;
+    }
+
+    const result = validateSourceText(this._sourceText);
+
+    if (requestId !== this._validationRequestId) {
+      return;
+    }
+
+    this._validationStatus = result.valid ? "Valid" : "Invalid";
+    this._validationResult = {
+      ...result,
+      details: [
+        ...(result.details ?? []),
+        { stage: "target", message: "OK" },
+      ],
+    };
+    this._validationError = null;
+    this._render();
+  }
+
+  async _validateSelectedTarget() {
+    const dashboards = await this._hass.connection.sendMessagePromise({
+      type: "lovelace/dashboards/list",
+    });
+    const targetUrlPath = this._dashboardTargetUrlPath(this._selectedDashboard);
+    const dashboard = Array.isArray(dashboards)
+      ? dashboards.find((item) => item.url_path === targetUrlPath)
+      : null;
+
+    if (!dashboard || dashboard.mode !== "storage") {
+      return {
+        valid: false,
+        stage: "target",
+        message: `The target dashboard ${this._dashboardPath(
+          this._selectedDashboard
+        )} no longer exists as a Storage Mode dashboard.`,
+      };
+    }
+
+    return { valid: true };
   }
 
   _renderDashboardList(dashboards) {
@@ -475,8 +572,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const dashboard = this._selectedDashboard;
     const sourceStatus =
       this._sourceStatus === "Error" ||
-      this._sourceStatus === "Saving" ||
-      this._sourceStatus === "Saved"
+      this._sourceStatus === "Saving"
         ? this._sourceStatus
         : this._hasUnsavedSourceChanges()
           ? "Unsaved changes"
@@ -537,6 +633,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceStatus === "Saving" || !this._hasUnsavedSourceChanges()
         ? "disabled"
         : "";
+    const validateDisabled =
+      this._validationStatus === "Validating" ? "disabled" : "";
 
     return `
       <div class="source-editor">
@@ -544,15 +642,99 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         <p class="state">
           This Source YAML is stored as the editor text, using LF newlines in
           v0.1. Saving it does not modify Home Assistant's Lovelace
-          configuration.
+          configuration. Validate checks the current editor text and does not
+          save or deploy it.
         </p>
         <textarea id="source-yaml" spellcheck="false"></textarea>
         <div class="source-actions">
           <button type="button" id="save-source-document" ${saveDisabled}>
             Save Source
           </button>
+          <button type="button" id="validate-source-document" ${validateDisabled}>
+            Validate
+          </button>
         </div>
       </div>
+    `;
+  }
+
+  _renderValidationSection() {
+    const statusClass =
+      this._validationStatus === "Invalid" || this._validationStatus === "Error"
+        ? " error"
+        : "";
+
+    return `
+      <section class="section">
+        <h2>Validation</h2>
+        <dl class="validation-status">
+          <dt>Status</dt>
+          <dd id="validation-status-value" class="${statusClass.trim()}">${this._escapeHtml(
+            this._validationStatus
+          )}</dd>
+        </dl>
+        <div id="validation-body">${this._renderValidationBody()}</div>
+      </section>
+    `;
+  }
+
+  _renderValidationBody() {
+    if (this._validationStatus === "Not validated") {
+      return `<p class="state">Validate checks the current editor text and does not save or deploy it.</p>`;
+    }
+
+    if (this._validationStatus === "Validating") {
+      return `<p class="state">Validating Source YAML...</p>`;
+    }
+
+    if (this._validationStatus === "Error") {
+      return `<p class="state error">${this._escapeHtml(
+        this._validationError || "Validation failed because of a communication error."
+      )}</p>`;
+    }
+
+    if (this._validationStatus === "Valid") {
+      const summary = this._validationResult?.summary;
+      const views =
+        typeof summary?.views === "number"
+          ? `<dt>Views</dt><dd>${summary.views}</dd>`
+          : "";
+      const strategy = summary?.strategy
+        ? `<dt>Strategy</dt><dd>Configured</dd>`
+        : "";
+
+      return `
+        <dl class="validation-status">
+          <dt>YAML syntax</dt><dd>OK</dd>
+          <dt>JSON/WebSocket compatible</dt><dd>OK</dd>
+          <dt>Lovelace structure</dt><dd>OK</dd>
+          <dt>Target</dt><dd>OK</dd>
+          ${views}
+          ${strategy}
+        </dl>
+      `;
+    }
+
+    const result = this._validationResult;
+    const location =
+      result?.line != null
+        ? `<dt>Location</dt><dd>Line ${this._escapeHtml(result.line)}, column ${this._escapeHtml(
+            result.column ?? "?"
+          )}</dd>`
+        : "";
+    const path = result?.path
+      ? `<dt>Path</dt><dd>${this._escapeHtml(result.path)}</dd>`
+      : "";
+
+    return `
+      <dl class="validation-status">
+        <dt>Stage</dt><dd>${this._escapeHtml(result?.stage ?? "validation")}</dd>
+        <dt>Message</dt><dd>${this._escapeHtml(
+          result?.message ?? "Source YAML is invalid."
+        )}</dd>
+        ${location}
+        ${path}
+      </dl>
     `;
   }
 
@@ -785,6 +967,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .validation-status {
+          margin-bottom: 16px;
+        }
+
         .config-viewer {
           display: grid;
           gap: 12px;
@@ -794,6 +980,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         .source-actions {
           display: grid;
           gap: 12px;
+        }
+
+        .source-actions {
+          grid-template-columns: repeat(auto-fit, minmax(140px, max-content));
         }
 
         label {
@@ -888,6 +1078,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ${this._renderUnsupportedList(unsupportedDashboards)}
         ${this._renderConfigurationSection()}
         ${this._renderSourceDocumentSection()}
+        ${this._renderValidationSection()}
       </section>
     `;
 
@@ -915,18 +1106,36 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .getElementById("save-source-document")
       ?.addEventListener("click", () => this._saveSourceDocument());
 
+    this.shadowRoot
+      .getElementById("validate-source-document")
+      ?.addEventListener("click", () => this._validateSourceDocument());
+
     const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
     if (sourceTextarea) {
       sourceTextarea.value = this._sourceText;
       sourceTextarea.addEventListener("input", (event) => {
         this._sourceText = event.target.value;
+        this._clearValidation();
         const statusValue = this.shadowRoot.getElementById("source-status-value");
+        const validationStatus = this.shadowRoot.getElementById(
+          "validation-status-value"
+        );
+        const validationBody = this.shadowRoot.getElementById("validation-body");
         const saveButton = this.shadowRoot.getElementById("save-source-document");
 
         if (statusValue) {
           statusValue.textContent = this._hasUnsavedSourceChanges()
             ? "Unsaved changes"
             : this._sourceStatus;
+        }
+
+        if (validationStatus) {
+          validationStatus.textContent = this._validationStatus;
+          validationStatus.className = "";
+        }
+
+        if (validationBody) {
+          validationBody.innerHTML = this._renderValidationBody();
         }
 
         if (saveButton) {
