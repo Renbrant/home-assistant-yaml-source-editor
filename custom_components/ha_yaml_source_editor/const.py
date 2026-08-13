@@ -16,6 +16,7 @@ WS_TYPE_DOCUMENTS_GET = f"{DOMAIN}/documents/get"
 WS_TYPE_DOCUMENTS_CREATE = f"{DOMAIN}/documents/create"
 WS_TYPE_DOCUMENTS_SAVE_SOURCE = f"{DOMAIN}/documents/save_source"
 WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT = f"{DOMAIN}/documents/record_deployment"
+WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION = f"{DOMAIN}/documents/import_ha_version"
 WS_TYPE_HASH_SHA256 = f"{DOMAIN}/hash/sha256"
 
 DOCUMENT_STORAGE_KEY = f"{DOMAIN}.documents"

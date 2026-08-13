@@ -16,8 +16,30 @@ import {
   diffSemantic,
   serializeDiffValue,
 } from "./semantic-diff.mjs";
+import {
+  MAX_IMPORTED_SOURCE_BYTES,
+  haConfigToSourceYaml,
+  utf8Length,
+} from "./ha-import.mjs";
+import {
+  assessFinalOverwriteRead,
+  assessOverwritePreflight,
+} from "./conflict-resolution-logic.mjs";
 
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+
+const RESOLUTION_OPERATION = {
+  IDLE: "Idle",
+  PREPARING_IMPORT: "Preparing import",
+  PREPARING_OVERWRITE: "Preparing overwrite",
+  AWAITING_CONFIRMATION: "Awaiting confirmation",
+  IMPORTING: "Importing",
+  DEPLOYING: "Deploying",
+  VERIFYING: "Verifying",
+  RECORDING_BASELINE: "Recording baseline",
+  SUCCESS: "Success",
+  ERROR: "Error",
+};
 
 class HaYamlSourceEditorPanel extends HTMLElement {
   constructor() {
@@ -61,9 +83,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._deploymentRequestId = 0;
     this._compareStatus = "Idle";
     this._compareResult = null;
+    this._compareSnapshot = null;
     this._compareError = null;
     this._compareMessage = null;
     this._compareRequestId = 0;
+    this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+    this._resolutionMessage = null;
+    this._resolutionRequestId = 0;
   }
 
   set hass(hass) {
@@ -142,6 +168,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       return;
     }
 
+    if (this._isResolutionInProgress()) {
+      this._resolutionMessage = "Conflict resolution is in progress.";
+      this._render();
+      return;
+    }
+
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
     }
@@ -169,6 +201,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
     this._deploymentMessage = null;
     this._deploymentRequestId += 1;
+    this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+    this._resolutionMessage = null;
+    this._resolutionRequestId += 1;
   }
 
   _escapeHtml(value) {
@@ -265,6 +300,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   _clearComparison(message = null) {
     this._compareStatus = "Idle";
     this._compareResult = null;
+    this._compareSnapshot = null;
     this._compareError = null;
     this._compareMessage = message;
     this._compareRequestId += 1;
@@ -273,6 +309,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   _selectDashboard(dashboard) {
     if (this._isDeploymentInProgress()) {
       this._deploymentMessage = "Deployment is in progress.";
+      this._render();
+      return;
+    }
+
+    if (this._isResolutionInProgress()) {
+      this._resolutionMessage = "Conflict resolution is in progress.";
       this._render();
       return;
     }
@@ -300,6 +342,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
     this._deploymentMessage = null;
     this._deploymentRequestId += 1;
+    this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+    this._resolutionMessage = null;
+    this._resolutionRequestId += 1;
     this._render();
 
     this._loadDashboardConfig(dashboard, requestId);
@@ -479,7 +524,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     if (
       !this._sourceDocument ||
       !this._selectedDashboard ||
-      this._isDeploymentInProgress()
+      this._isDeploymentInProgress() ||
+      this._isResolutionInProgress()
     ) {
       return;
     }
@@ -529,7 +575,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       }
 
       const deploymentCanonicalJson = canonicalJson(sourceAnalysis.parsedConfig);
-      if (this._utf8Length(deploymentCanonicalJson) > MAX_DEPLOYMENT_SNAPSHOT_BYTES) {
+      if (utf8Length(deploymentCanonicalJson) > MAX_DEPLOYMENT_SNAPSHOT_BYTES) {
         throw new DeploymentBlockedError(
           "Deployment snapshot exceeds the 8 MiB limit. Nothing was deployed.",
           DEPLOYMENT_OPERATION.ERROR
@@ -620,11 +666,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._deploymentMessage = "Writing saved Source to Home Assistant.";
       this._render();
 
-      await this._hass.callWS({
-        type: "lovelace/config/save",
-        url_path: this._dashboardTargetUrlPath(this._selectedDashboard),
-        config: sourceAnalysis.parsedConfig,
-      });
+      await this._asyncSaveLovelaceConfig(
+        this._selectedDashboard,
+        sourceAnalysis.parsedConfig
+      );
       if (requestId !== this._deploymentRequestId) {
         return;
       }
@@ -829,6 +874,21 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         return;
       }
 
+      const sourceCanonicalJson = canonicalJson(sourceAnalysis.parsedConfig);
+      const haCanonicalJson = canonicalJson(currentHaConfig);
+      const sourceTextHash = await this._hashText(freshDocument.source_text);
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+      const sourceSemanticHash = await this._hashText(sourceCanonicalJson);
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+      const haSemanticHash = await this._hashText(haCanonicalJson);
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+
       const baseline = freshDocument.deployment_baseline ?? null;
       const currentDifference = diffSemantic(
         sourceAnalysis.parsedConfig,
@@ -863,6 +923,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._config = currentHaConfig;
       this._configStatus = "Loaded";
       this._compareResult = compareResult;
+      this._compareSnapshot = {
+        documentId: freshDocument.document_id,
+        documentUpdatedAt: freshDocument.updated_at,
+        sourceTextHash,
+        sourceSemanticHash,
+        haSemanticHash,
+        haCanonicalJson,
+        targetUrlPath: this._dashboardTargetUrlPath(this._selectedDashboard),
+      };
       this._compareStatus =
         currentDifference.totalDifferences === 0 ? "No differences" : "Ready";
       this._compareError = null;
@@ -881,6 +950,328 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     this._render();
+  }
+
+  async _importHaVersion() {
+    if (!this._canResolveFromCompare()) {
+      return;
+    }
+
+    const requestId = this._resolutionRequestId + 1;
+    this._resolutionRequestId = requestId;
+    this._resolutionStatus = RESOLUTION_OPERATION.PREPARING_IMPORT;
+    this._resolutionMessage = null;
+    this._render();
+
+    try {
+      const snapshot = this._compareSnapshot;
+      const freshDocument = await this._fetchSourceDocument(snapshot.documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      this._requireComparedDocument(freshDocument, snapshot);
+
+      await this._requireSelectedStorageTarget();
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const currentHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const haCanonicalJson = canonicalJson(currentHaConfig);
+      const haSemanticHash = await this._hashText(haCanonicalJson);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      if (haSemanticHash !== snapshot.haSemanticHash) {
+        throw new StaleComparisonError(
+          "Home Assistant changed since comparison. Compare again."
+        );
+      }
+
+      const importedSourceText = haConfigToSourceYaml(currentHaConfig);
+      if (utf8Length(importedSourceText) > MAX_IMPORTED_SOURCE_BYTES) {
+        throw new ResolutionBlockedError(
+          "Imported Source YAML exceeds the 2 MiB Source Document limit."
+        );
+      }
+
+      const importedAnalysis = analyzeSourceText(importedSourceText);
+      if (!importedAnalysis.validation.valid) {
+        throw new ResolutionBlockedError(
+          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+        );
+      }
+
+      const importedSemanticHash = await this._hashText(
+        canonicalJson(importedAnalysis.parsedConfig)
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      if (importedSemanticHash !== haSemanticHash) {
+        throw new ResolutionBlockedError(
+          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+        );
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.AWAITING_CONFIRMATION;
+      this._resolutionMessage = "Import confirmation required.";
+      this._render();
+
+      if (!this._confirmHaImport()) {
+        this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+        this._resolutionMessage = "Import cancelled.";
+        this._render();
+        return;
+      }
+
+      const finalDocument = await this._fetchSourceDocument(snapshot.documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      this._requireComparedDocument(finalDocument, snapshot);
+
+      const finalHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const finalHaCanonicalJson = canonicalJson(finalHaConfig);
+      const finalHaHash = await this._hashText(finalHaCanonicalJson);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      if (finalHaHash !== snapshot.haSemanticHash) {
+        throw new StaleComparisonError(
+          "Home Assistant changed since comparison. Compare again."
+        );
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.IMPORTING;
+      this._resolutionMessage = "Importing Home Assistant version as Source.";
+      this._render();
+
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/import_ha_version",
+        document_id: snapshot.documentId,
+        expected_source_updated_at: snapshot.documentUpdatedAt,
+        source_text: importedSourceText,
+        source_semantic_hash: importedSemanticHash,
+        ha_semantic_hash: finalHaHash,
+        ha_canonical_json: finalHaCanonicalJson,
+        home_assistant_version: this._homeAssistantVersion(),
+      });
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._sourceDocument = result.document;
+      this._sourceText = result.document.source_text;
+      this._lastSavedSourceText = result.document.source_text;
+      this._sourceStatus = "Saved";
+      this._config = finalHaConfig;
+      this._configStatus = "Loaded";
+      this._clearValidation();
+      this._clearComparison();
+      this._resolutionStatus = RESOLUTION_OPERATION.SUCCESS;
+      this._resolutionMessage = "Home Assistant version imported as Source.";
+      await this._refreshSyncStatus({ reloadHa: true });
+    } catch (err) {
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      if (err instanceof StaleComparisonError) {
+        this._clearComparison(err.message);
+      }
+      this._resolutionStatus = RESOLUTION_OPERATION.ERROR;
+      this._resolutionMessage = err?.message || "Unable to import HA version.";
+      this._render();
+    }
+  }
+
+  async _overwriteHaWithSavedSource() {
+    if (!this._canResolveFromCompare()) {
+      return;
+    }
+
+    const requestId = this._resolutionRequestId + 1;
+    this._resolutionRequestId = requestId;
+    this._resolutionStatus = RESOLUTION_OPERATION.PREPARING_OVERWRITE;
+    this._resolutionMessage = null;
+    this._render();
+
+    try {
+      const snapshot = this._compareSnapshot;
+      const freshDocument = await this._fetchSourceDocument(snapshot.documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const sourceAnalysis = analyzeSourceText(freshDocument.source_text);
+      if (!sourceAnalysis.validation.valid) {
+        throw new ResolutionBlockedError(
+          "Saved Source is invalid. Use Validate for details before resolving."
+        );
+      }
+
+      const sourceTextHash = await this._hashText(freshDocument.source_text);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const sourceSemanticHash = await this._hashText(
+        canonicalJson(sourceAnalysis.parsedConfig)
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      await this._requireSelectedStorageTarget();
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const currentHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const currentHaHash = await this._hashText(canonicalJson(currentHaConfig));
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const preflight = assessOverwritePreflight({
+        compareSnapshot: snapshot,
+        hasUnsavedChanges: this._hasUnsavedSourceChanges(),
+        freshDocumentUpdatedAt: freshDocument.updated_at,
+        currentSourceTextHash: sourceTextHash,
+        currentSourceSemanticHash: sourceSemanticHash,
+        currentHaSemanticHash: currentHaHash,
+        syncStatus: this._syncStatus,
+      });
+      if (!preflight.allowed) {
+        throw new StaleComparisonError(preflight.message);
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.AWAITING_CONFIRMATION;
+      this._resolutionMessage = "Overwrite confirmation required.";
+      this._render();
+
+      if (!this._confirmOverwrite()) {
+        this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+        this._resolutionMessage = "Overwrite cancelled.";
+        this._render();
+        return;
+      }
+
+      const finalDocument = await this._fetchSourceDocument(snapshot.documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      this._requireComparedDocument(finalDocument, snapshot);
+
+      const latestHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const latestHaHash = await this._hashText(canonicalJson(latestHaConfig));
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const finalCheck = assessFinalOverwriteRead({
+        latestHaSemanticHash: latestHaHash,
+        preconfirmationHaSemanticHash: currentHaHash,
+        compareSnapshot: snapshot,
+      });
+      if (!finalCheck.allowed) {
+        throw new StaleComparisonError(finalCheck.message);
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.DEPLOYING;
+      this._resolutionMessage = "Overwriting Home Assistant with saved Source.";
+      this._render();
+      await this._asyncSaveLovelaceConfig(
+        this._selectedDashboard,
+        sourceAnalysis.parsedConfig
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.VERIFYING;
+      this._resolutionMessage = "Verifying overwritten Home Assistant dashboard.";
+      this._render();
+      const verifiedHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const verifiedCanonicalJson = canonicalJson(verifiedHaConfig);
+      const verifiedHaHash = await this._hashText(verifiedCanonicalJson);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      const postSave = verifyPostSave({
+        verifiedHaSemanticHash: verifiedHaHash,
+        deploymentSourceSemanticHash: sourceSemanticHash,
+      });
+      if (!postSave.verified) {
+        throw new ResolutionBlockedError(postSave.message);
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.RECORDING_BASELINE;
+      this._resolutionMessage = "Recording deployment baseline.";
+      this._render();
+      const recordResult = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/record_deployment",
+        document_id: snapshot.documentId,
+        expected_source_updated_at: snapshot.documentUpdatedAt,
+        source_semantic_hash: sourceSemanticHash,
+        ha_semantic_hash: verifiedHaHash,
+        home_assistant_version: this._homeAssistantVersion(),
+        deployed_canonical_json: verifiedCanonicalJson,
+      });
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._sourceDocument = recordResult.document;
+      this._sourceText = recordResult.document.source_text;
+      this._lastSavedSourceText = recordResult.document.source_text;
+      this._sourceStatus = "Saved";
+      this._config = verifiedHaConfig;
+      this._configStatus = "Loaded";
+      this._clearComparison();
+      this._resolutionStatus = RESOLUTION_OPERATION.SUCCESS;
+      this._resolutionMessage = "Home Assistant overwritten and verified.";
+      await this._refreshSyncStatus({ reloadHa: true });
+    } catch (err) {
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+      if (err instanceof StaleComparisonError) {
+        this._clearComparison(err.message);
+      }
+      this._resolutionStatus = RESOLUTION_OPERATION.ERROR;
+      this._resolutionMessage = err?.message || "Unable to overwrite Home Assistant.";
+      this._render();
+    }
   }
 
   async _validateSelectedTarget() {
@@ -923,6 +1314,18 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     ].includes(this._deploymentStatus);
   }
 
+  _isResolutionInProgress() {
+    return [
+      RESOLUTION_OPERATION.PREPARING_IMPORT,
+      RESOLUTION_OPERATION.PREPARING_OVERWRITE,
+      RESOLUTION_OPERATION.AWAITING_CONFIRMATION,
+      RESOLUTION_OPERATION.IMPORTING,
+      RESOLUTION_OPERATION.DEPLOYING,
+      RESOLUTION_OPERATION.VERIFYING,
+      RESOLUTION_OPERATION.RECORDING_BASELINE,
+    ].includes(this._resolutionStatus);
+  }
+
   _confirmDeployment(firstDeployment) {
     const dashboardPath = this._dashboardPath(this._selectedDashboard);
     const message = firstDeployment
@@ -930,6 +1333,71 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       : `Deploy saved Source YAML to ${dashboardPath}?`;
 
     return window.confirm(message);
+  }
+
+  _canResolveFromCompare() {
+    if (
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._hasUnsavedSourceChanges() ||
+      this._isDeploymentInProgress() ||
+      this._isResolutionInProgress() ||
+      this._compareStatus !== "Ready" ||
+      !this._compareSnapshot ||
+      this._sourceVsHa !== "DIFFERENT"
+    ) {
+      return false;
+    }
+
+    return (
+      this._compareSnapshot.documentId === this._sourceDocument.document_id &&
+      this._compareSnapshot.targetUrlPath ===
+        this._dashboardTargetUrlPath(this._selectedDashboard)
+    );
+  }
+
+  async _requireSelectedStorageTarget() {
+    const targetResult = await this._validateSelectedTarget();
+    if (!targetResult.valid) {
+      throw new StaleComparisonError(targetResult.message);
+    }
+  }
+
+  _requireComparedDocument(document, snapshot) {
+    if (
+      document.document_id !== snapshot.documentId ||
+      document.updated_at !== snapshot.documentUpdatedAt
+    ) {
+      throw new StaleComparisonError(
+        "Source changed since comparison. Compare again."
+      );
+    }
+  }
+
+  _homeAssistantVersion() {
+    return this._status?.home_assistant_version ?? "unknown";
+  }
+
+  _confirmHaImport() {
+    return window.confirm(
+      "Import the current Home Assistant version as Source YAML?\n\n" +
+        "This will REPLACE the saved Source Document.\n\n" +
+        "Comments, blank lines, quoting, formatting, and manual YAML organization from the previous Source may be permanently lost.\n\n" +
+        "The Home Assistant dashboard itself will NOT be modified.\n\n" +
+        "Continue?"
+    );
+  }
+
+  _confirmOverwrite() {
+    return window.confirm(
+      `Overwrite Home Assistant ${this._dashboardPath(
+        this._selectedDashboard
+      )} with the saved Source YAML?\n\n` +
+        "You reviewed the current differences with Compare.\n\n" +
+        "This will replace the current Home Assistant dashboard configuration with the saved Source.\n\n" +
+        "The current HA-only changes shown in Compare will be lost.\n\n" +
+        "Continue?"
+    );
   }
 
   _scheduleSyncRefresh() {
@@ -1037,10 +1505,6 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return result.sha256;
   }
 
-  _utf8Length(text) {
-    return new TextEncoder().encode(text).length;
-  }
-
   async _readDashboardConfig(dashboard, { force = false } = {}) {
     const message = {
       type: "lovelace/config",
@@ -1056,6 +1520,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     return this._hass.connection.sendMessagePromise(message);
+  }
+
+  async _asyncSaveLovelaceConfig(dashboard, config) {
+    return this._hass.callWS({
+      type: "lovelace/config/save",
+      url_path: this._dashboardTargetUrlPath(dashboard),
+      config,
+    });
   }
 
   _renderDashboardList(dashboards) {
@@ -1231,6 +1703,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       !this._selectedDashboard ||
       this._hasUnsavedSourceChanges() ||
       this._isDeploymentInProgress() ||
+      this._isResolutionInProgress() ||
       this._sourceText.length === 0
         ? "disabled"
         : "";
@@ -1345,7 +1818,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const refreshDisabled =
       !this._sourceDocument ||
       !this._selectedDashboard ||
-      this._syncStatus === "Calculating"
+      this._syncStatus === "Calculating" ||
+      this._isResolutionInProgress()
         ? "disabled"
         : "";
 
@@ -1362,7 +1836,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           the dashboard was deployed by HA YAML Source Editor.
         </p>
         <dl class="sync-status">
-          <dt>Deployment status</dt>
+          <dt>Sync status</dt>
           <dd class="${statusClass.trim()}">${this._escapeHtml(this._syncStatus)}</dd>
           <dt>Source vs HA</dt>
           <dd>${this._escapeHtml(this._sourceVsHa)}</dd>
@@ -1391,6 +1865,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ? " error"
         : "";
     const baseline = this._sourceDocument?.deployment_baseline ?? null;
+    const baselineOrigin = baseline?.origin ?? null;
+    const lastDeployed =
+      baselineOrigin === "deployment"
+        ? `<dt>Last deployed</dt><dd>${this._escapeHtml(
+            baseline?.deployed_at ?? "-"
+          )}</dd>`
+        : "";
+    const importNote =
+      baselineOrigin === "ha_import"
+        ? `<p class="state">This Source was imported from Home Assistant's normalized configuration. Original comments/formatting removed by Home Assistant cannot be recovered.</p>`
+        : "";
 
     return `
       <section class="section">
@@ -1400,8 +1885,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <dd class="${statusClass.trim()}">${this._escapeHtml(
             this._deploymentStatus
           )}</dd>
-          <dt>Last deployed</dt>
-          <dd>${this._escapeHtml(baseline?.deployed_at ?? "-")}</dd>
+          <dt>Baseline origin</dt>
+          <dd>${this._escapeHtml(this._formatBaselineOrigin(baselineOrigin))}</dd>
+          <dt>Baseline established</dt>
+          <dd>${this._escapeHtml(baseline?.established_at ?? "-")}</dd>
+          ${lastDeployed}
           <dt>HA baseline</dt>
           <dd title="${this._escapeHtml(
             baseline?.ha_semantic_hash ?? ""
@@ -1412,8 +1900,19 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           )}</dd>
         </dl>
         ${this._renderDeploymentMessage()}
+        ${importNote}
       </section>
     `;
+  }
+
+  _formatBaselineOrigin(origin) {
+    if (origin === "deployment") {
+      return "Deployment";
+    }
+    if (origin === "ha_import") {
+      return "Imported from Home Assistant";
+    }
+    return "-";
   }
 
   _renderDeploymentMessage() {
@@ -1565,6 +2064,56 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderResolutionSection() {
+    const statusClass = this._resolutionStatus === RESOLUTION_OPERATION.ERROR
+      ? " error"
+      : "";
+    const canResolve = this._canResolveFromCompare();
+    const importDisabled = canResolve ? "" : "disabled";
+    const overwriteAllowed =
+      canResolve && ["HA MODIFIED", "BOTH MODIFIED"].includes(this._syncStatus);
+    const overwriteDisabled = overwriteAllowed ? "" : "disabled";
+
+    return `
+      <section class="section">
+        <h2>Conflict resolution</h2>
+        <dl class="resolution-status">
+          <dt>Status</dt>
+          <dd class="${statusClass.trim()}">${this._escapeHtml(
+            this._resolutionStatus
+          )}</dd>
+        </dl>
+        <div class="resolution-actions">
+          <button type="button" id="import-ha-version" ${importDisabled}>
+            Import HA Version
+          </button>
+          <button type="button" id="overwrite-ha-source" ${overwriteDisabled}>
+            Overwrite HA with Saved Source
+          </button>
+        </div>
+        ${this._renderResolutionMessage()}
+      </section>
+    `;
+  }
+
+  _renderResolutionMessage() {
+    if (this._resolutionMessage) {
+      const messageClass =
+        this._resolutionStatus === RESOLUTION_OPERATION.ERROR
+          ? "state error"
+          : "state";
+      return `<p class="${messageClass}">${this._escapeHtml(
+        this._resolutionMessage
+      )}</p>`;
+    }
+
+    if (this._compareStatus !== "Ready") {
+      return `<p class="state">Run Compare Source vs HA before choosing an explicit conflict resolution.</p>`;
+    }
+
+    return `<p class="state">Resolution actions use the exact Home Assistant state reviewed by Compare.</p>`;
+  }
+
   _renderDiffGroup(title, subtitle, diffResult, sourceLabel, haLabel) {
     const count = diffResult.totalDifferences;
     const summary =
@@ -1686,7 +2235,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const refreshDisabled =
       this._dashboardLoading ||
       !this._canUseConnection() ||
-      this._isDeploymentInProgress()
+      this._isDeploymentInProgress() ||
+      this._isResolutionInProgress()
         ? "disabled"
         : "";
 
@@ -1877,6 +2427,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .resolution-status {
+          margin-bottom: 16px;
+        }
+
         .sync-status {
           margin: 16px 0;
         }
@@ -1887,12 +2441,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
 
         .source-editor,
-        .source-actions {
+        .source-actions,
+        .resolution-actions {
           display: grid;
           gap: 12px;
         }
 
-        .source-actions {
+        .source-actions,
+        .resolution-actions {
           grid-template-columns: repeat(auto-fit, minmax(140px, max-content));
         }
 
@@ -2052,6 +2608,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ${this._renderDeploymentSection()}
         ${this._renderSyncSection()}
         ${this._renderCompareSection()}
+        ${this._renderResolutionSection()}
       </section>
     `;
 
@@ -2095,6 +2652,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .getElementById("compare-source-ha")
       ?.addEventListener("click", () => this._compareSourceToHa());
 
+    this.shadowRoot
+      .getElementById("import-ha-version")
+      ?.addEventListener("click", () => this._importHaVersion());
+
+    this.shadowRoot
+      .getElementById("overwrite-ha-source")
+      ?.addEventListener("click", () => this._overwriteHaWithSavedSource());
+
     const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
     if (sourceTextarea) {
       sourceTextarea.value = this._sourceText;
@@ -2117,6 +2682,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         const saveButton = this.shadowRoot.getElementById("save-source-document");
         const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
         const compareButton = this.shadowRoot.getElementById("compare-source-ha");
+        const importButton = this.shadowRoot.getElementById("import-ha-version");
+        const overwriteButton = this.shadowRoot.getElementById("overwrite-ha-source");
 
         if (statusValue) {
           statusValue.textContent = this._hasUnsavedSourceChanges()
@@ -2150,14 +2717,26 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           deployButton.disabled =
             this._hasUnsavedSourceChanges() ||
             this._sourceText.length === 0 ||
-            this._isDeploymentInProgress();
+            this._isDeploymentInProgress() ||
+            this._isResolutionInProgress();
         }
 
         if (compareButton) {
           compareButton.disabled =
             this._hasUnsavedSourceChanges() ||
             this._compareStatus === "Loading" ||
-            this._isDeploymentInProgress();
+            this._isDeploymentInProgress() ||
+            this._isResolutionInProgress();
+        }
+
+        if (importButton) {
+          importButton.disabled = !this._canResolveFromCompare();
+        }
+
+        if (overwriteButton) {
+          overwriteButton.disabled =
+            !this._canResolveFromCompare() ||
+            !["HA MODIFIED", "BOTH MODIFIED"].includes(this._syncStatus);
         }
       });
     }
@@ -2177,5 +2756,9 @@ class DeploymentBlockedError extends Error {
 }
 
 class CompareBlockedError extends Error {}
+
+class ResolutionBlockedError extends Error {}
+
+class StaleComparisonError extends ResolutionBlockedError {}
 
 customElements.define("ha-yaml-source-editor-panel", HaYamlSourceEditorPanel);
