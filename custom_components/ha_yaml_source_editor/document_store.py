@@ -18,6 +18,10 @@ from .const import (
     DOCUMENT_TARGET_TYPE_LOVELACE_STORAGE_DASHBOARD,
     MAX_SOURCE_TEXT_BYTES,
 )
+from .deployment_baseline import (
+    DeploymentBaselineValidationError,
+    validate_deployed_canonical_json,
+)
 from .hashing import sha256_text
 
 
@@ -145,12 +149,21 @@ class SourceDocumentStore:
         source_semantic_hash: str,
         ha_semantic_hash: str,
         home_assistant_version: str,
+        deployed_canonical_json: str | None = None,
     ) -> dict[str, Any]:
         """Record a verified deployment baseline without changing source text."""
         self._validate_hash(source_semantic_hash, "source_semantic_hash")
         self._validate_hash(ha_semantic_hash, "ha_semantic_hash")
         if not isinstance(home_assistant_version, str) or not home_assistant_version:
             raise InvalidDeploymentBaselineError("Home Assistant version is required.")
+        try:
+            validated_deployed_canonical_json = validate_deployed_canonical_json(
+                deployed_canonical_json,
+                source_semantic_hash,
+                ha_semantic_hash,
+            )
+        except DeploymentBaselineValidationError as err:
+            raise InvalidDeploymentBaselineError(str(err)) from err
 
         async with self._lock:
             data = await self._async_get_data_unlocked()
@@ -160,13 +173,19 @@ class SourceDocumentStore:
             if document["updated_at"] != expected_source_updated_at:
                 raise DocumentChangedError("Source Document changed during deployment.")
 
-            document["deployment_baseline"] = {
+            deployment_baseline = {
                 "deployed_at": self._now(),
                 "source_text_hash": sha256_text(document["source_text"]),
                 "source_semantic_hash": source_semantic_hash,
                 "ha_semantic_hash": ha_semantic_hash,
                 "home_assistant_version": home_assistant_version,
             }
+            if validated_deployed_canonical_json is not None:
+                deployment_baseline["deployed_canonical_json"] = (
+                    validated_deployed_canonical_json
+                )
+
+            document["deployment_baseline"] = deployment_baseline
             document["updated_at"] = self._now()
             await self._store.async_save(data)
             return self._document_with_defaults(document)
