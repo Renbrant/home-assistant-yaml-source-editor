@@ -11,6 +11,13 @@ import {
   verifyFinalHaRead,
   verifyPostSave,
 } from "./deployment-logic.mjs";
+import {
+  analyzeThreeWay,
+  diffSemantic,
+  serializeDiffValue,
+} from "./semantic-diff.mjs";
+
+const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 
 class HaYamlSourceEditorPanel extends HTMLElement {
   constructor() {
@@ -52,6 +59,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
     this._deploymentMessage = null;
     this._deploymentRequestId = 0;
+    this._compareStatus = "Idle";
+    this._compareResult = null;
+    this._compareError = null;
+    this._compareMessage = null;
+    this._compareRequestId = 0;
   }
 
   set hass(hass) {
@@ -153,6 +165,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId += 1;
     this._clearValidation();
     this._clearSyncState();
+    this._clearComparison();
     this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
     this._deploymentMessage = null;
     this._deploymentRequestId += 1;
@@ -249,6 +262,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
   }
 
+  _clearComparison(message = null) {
+    this._compareStatus = "Idle";
+    this._compareResult = null;
+    this._compareError = null;
+    this._compareMessage = message;
+    this._compareRequestId += 1;
+  }
+
   _selectDashboard(dashboard) {
     if (this._isDeploymentInProgress()) {
       this._deploymentMessage = "Deployment is in progress.";
@@ -275,6 +296,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceError = null;
     this._clearValidation();
     this._clearSyncState();
+    this._clearComparison();
     this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
     this._deploymentMessage = null;
     this._deploymentRequestId += 1;
@@ -354,6 +376,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceStatus = "Loaded";
       this._sourceError = null;
       this._clearValidation();
+      this._clearComparison();
       this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
@@ -397,6 +420,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
       this._clearValidation();
+      this._clearComparison();
       this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
@@ -437,6 +461,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._lastSavedSourceText = result.document.source_text;
       this._sourceStatus = "Saved";
       this._sourceError = null;
+      this._clearComparison();
       this._scheduleSyncRefresh();
     } catch (err) {
       if (requestId !== this._sourceRequestId) {
@@ -503,8 +528,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         );
       }
 
+      const deploymentCanonicalJson = canonicalJson(sourceAnalysis.parsedConfig);
+      if (this._utf8Length(deploymentCanonicalJson) > MAX_DEPLOYMENT_SNAPSHOT_BYTES) {
+        throw new DeploymentBlockedError(
+          "Deployment snapshot exceeds the 8 MiB limit. Nothing was deployed.",
+          DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+
       const deploymentSourceSemanticHash = await this._hashText(
-        canonicalJson(sourceAnalysis.parsedConfig)
+        deploymentCanonicalJson
       );
       if (requestId !== this._deploymentRequestId) {
         return;
@@ -638,6 +671,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           ha_semantic_hash: verifiedHaHash,
           home_assistant_version:
             this._status?.home_assistant_version ?? "unknown",
+          deployed_canonical_json: canonicalJson(verifiedHaConfig),
         });
       } catch (_err) {
         throw new DeploymentBlockedError(
@@ -663,6 +697,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._configStatus = "Loaded";
       this._deploymentStatus = DEPLOYMENT_OPERATION.SUCCESS;
       this._deploymentMessage = "Deployment verified and baseline recorded.";
+      this._clearComparison();
       await this._refreshSyncStatus({ reloadHa: true });
     } catch (err) {
       if (requestId !== this._deploymentRequestId) {
@@ -730,6 +765,121 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       ],
     };
     this._validationError = null;
+    this._render();
+  }
+
+  async _compareSourceToHa() {
+    if (!this._sourceDocument || !this._selectedDashboard) {
+      return;
+    }
+
+    if (this._hasUnsavedSourceChanges()) {
+      this._compareStatus = "Error";
+      this._compareError =
+        "Save Source before comparing. Compare uses the saved Source Document.";
+      this._compareResult = null;
+      this._compareMessage = null;
+      this._render();
+      return;
+    }
+
+    const requestId = this._compareRequestId + 1;
+    this._compareRequestId = requestId;
+    this._compareStatus = "Loading";
+    this._compareResult = null;
+    this._compareError = null;
+    this._compareMessage = null;
+    this._render();
+
+    try {
+      const freshDocument = await this._fetchSourceDocument(
+        this._sourceDocument.document_id
+      );
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+
+      if (freshDocument.source_text !== this._sourceText) {
+        throw new CompareBlockedError(
+          "The backend Source Document changed. Reload or reselect the Source Document."
+        );
+      }
+
+      const targetResult = await this._validateSelectedTarget();
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+
+      if (!targetResult.valid) {
+        throw new CompareBlockedError(targetResult.message);
+      }
+
+      const sourceAnalysis = analyzeSourceText(freshDocument.source_text);
+      if (!sourceAnalysis.validation.valid) {
+        throw new CompareBlockedError(
+          "Saved Source is invalid. Use Validate for details before comparing."
+        );
+      }
+
+      const currentHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+
+      const baseline = freshDocument.deployment_baseline ?? null;
+      const currentDifference = diffSemantic(
+        sourceAnalysis.parsedConfig,
+        currentHaConfig
+      );
+      let compareResult;
+
+      if (baseline?.deployed_canonical_json) {
+        const baselineValue = JSON.parse(baseline.deployed_canonical_json);
+        const threeWay = analyzeThreeWay({
+          baselineValue,
+          sourceValue: sourceAnalysis.parsedConfig,
+          haValue: currentHaConfig,
+        });
+        compareResult = {
+          mode: "three_way",
+          baselineAvailable: true,
+          sourceChanges: threeWay.sourceChanges,
+          haChanges: threeWay.haChanges,
+          currentDifference,
+        };
+      } else {
+        compareResult = {
+          mode: "two_way",
+          baselineAvailable: false,
+          currentDifference,
+        };
+      }
+
+      this._sourceDocument = freshDocument;
+      this._lastSavedSourceText = freshDocument.source_text;
+      this._config = currentHaConfig;
+      this._configStatus = "Loaded";
+      this._compareResult = compareResult;
+      this._compareStatus =
+        currentDifference.totalDifferences === 0 ? "No differences" : "Ready";
+      this._compareError = null;
+      this._compareMessage = this._hasUnsavedSourceChanges()
+        ? "Comparison uses saved Source; current editor has unsaved changes."
+        : null;
+    } catch (err) {
+      if (requestId !== this._compareRequestId) {
+        return;
+      }
+
+      this._compareStatus = "Error";
+      this._compareResult = null;
+      this._compareError = err?.message || "Unable to compare Source and HA.";
+      this._compareMessage = null;
+    }
+
     this._render();
   }
 
@@ -841,6 +991,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       if (requestId !== this._syncRequestId) {
         return;
       }
+      const previousHaSemanticHash = this._haSemanticHash;
+      const haHashChanged =
+        previousHaSemanticHash !== null &&
+        previousHaSemanticHash !== haSemanticHash;
 
       const deploymentBaseline =
         this._sourceDocument.deployment_baseline ?? null;
@@ -859,6 +1013,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._syncStatus = syncState.status;
       this._syncNote = syncState.note;
       this._syncError = null;
+      if (reloadHa && haHashChanged) {
+        this._clearComparison("Comparison cleared because Home Assistant changed.");
+      }
     } catch (err) {
       if (requestId !== this._syncRequestId) {
         return;
@@ -878,6 +1035,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       text,
     });
     return result.sha256;
+  }
+
+  _utf8Length(text) {
+    return new TextEncoder().encode(text).length;
   }
 
   async _readDashboardConfig(dashboard, { force = false } = {}) {
@@ -1287,6 +1448,190 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return "";
   }
 
+  _renderCompareSection() {
+    const statusClass = this._compareStatus === "Error" ? " error" : "";
+    const compareDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._compareStatus === "Loading" ||
+      this._hasUnsavedSourceChanges() ||
+      this._isDeploymentInProgress()
+        ? "disabled"
+        : "";
+
+    return `
+      <section class="section">
+        <div class="section-header">
+          <h2>Comparison</h2>
+          <button type="button" id="compare-source-ha" ${compareDisabled}>
+            Compare Source vs HA
+          </button>
+        </div>
+        <dl class="compare-status">
+          <dt>Status</dt>
+          <dd id="compare-status-value" class="${statusClass.trim()}">${this._escapeHtml(
+            this._compareStatus
+          )}</dd>
+          <dt>Last deployed snapshot</dt>
+          <dd>${this._escapeHtml(
+            this._sourceDocument?.deployment_baseline?.deployed_canonical_json
+              ? "Available"
+              : "Unavailable"
+          )}</dd>
+        </dl>
+        <div id="compare-body">${this._renderCompareBody()}</div>
+      </section>
+    `;
+  }
+
+  _renderCompareBody() {
+    if (this._hasUnsavedSourceChanges()) {
+      return `<p class="state">Save Source before comparing. Compare uses the saved Source Document.</p>`;
+    }
+
+    if (this._compareStatus === "Idle") {
+      return this._compareMessage
+        ? `<p class="state">${this._escapeHtml(this._compareMessage)}</p>`
+        : `<p class="state">Compare uses the saved Source Document and current Home Assistant configuration.</p>`;
+    }
+
+    if (this._compareStatus === "Loading") {
+      return `<p class="state">Loading comparison snapshot...</p>`;
+    }
+
+    if (this._compareStatus === "Error") {
+      return `<p class="state error">${this._escapeHtml(
+        this._compareError || "Unable to compare Source and HA."
+      )}</p>`;
+    }
+
+    if (!this._compareResult) {
+      return "";
+    }
+
+    if (this._compareStatus === "No differences") {
+      return `
+        <p class="state">
+          NO SEMANTIC DIFFERENCES. Comments, whitespace, quoting, and formatting
+          are not part of this semantic comparison.
+        </p>
+      `;
+    }
+
+    if (this._compareResult.mode === "three_way") {
+      return `
+        <p class="state">
+          Array reordering may appear as multiple indexed changes.
+        </p>
+        ${this._renderDiffGroup(
+          "Changes in Saved Source since last deployment",
+          "Last deployed -> Saved Source",
+          this._compareResult.sourceChanges,
+          "Last deployed",
+          "Saved Source"
+        )}
+        ${this._renderDiffGroup(
+          "Changes in Home Assistant since last deployment",
+          "Last deployed -> Current Home Assistant",
+          this._compareResult.haChanges,
+          "Last deployed",
+          "Current HA"
+        )}
+        ${this._renderDiffGroup(
+          "Current difference",
+          "Saved Source -> Current Home Assistant",
+          this._compareResult.currentDifference,
+          "Saved Source",
+          "Current HA"
+        )}
+      `;
+    }
+
+    return `
+      <p class="state">
+        Last deployed configuration snapshot is unavailable for this baseline.
+        Showing current Source vs Home Assistant only.
+      </p>
+      <p class="state">
+        Array reordering may appear as multiple indexed changes.
+      </p>
+      ${this._renderDiffGroup(
+        "Saved Source vs Current Home Assistant",
+        "Saved Source -> Current Home Assistant",
+        this._compareResult.currentDifference,
+        "Saved Source",
+        "Current HA"
+      )}
+    `;
+  }
+
+  _renderDiffGroup(title, subtitle, diffResult, sourceLabel, haLabel) {
+    const count = diffResult.totalDifferences;
+    const summary =
+      count === 0
+        ? "NO SEMANTIC DIFFERENCES"
+        : `${count} ${count === 1 ? "difference" : "differences"}`;
+    const truncated = diffResult.truncated
+      ? `<p class="state">Showing first ${diffResult.entries.length} differences. ${diffResult.omittedDifferences} more not shown.</p>`
+      : "";
+
+    return `
+      <section class="diff-group">
+        <h3>${this._escapeHtml(title)}</h3>
+        <p class="diff-subtitle">${this._escapeHtml(subtitle)}: ${this._escapeHtml(summary)}</p>
+        ${truncated}
+        ${
+          diffResult.entries.length === 0
+            ? ""
+            : `<ul class="diff-list">${diffResult.entries
+                .map((entry) => this._renderDiffEntry(entry, sourceLabel, haLabel))
+                .join("")}</ul>`
+        }
+      </section>
+    `;
+  }
+
+  _renderDiffEntry(entry, sourceLabel, haLabel) {
+    const sourceValue =
+      entry.kind === "ha_only"
+        ? ""
+        : this._renderDiffValue(sourceLabel, entry.sourceValue);
+    const haValue =
+      entry.kind === "source_only"
+        ? ""
+        : this._renderDiffValue(haLabel, entry.haValue);
+
+    return `
+      <li class="diff-entry">
+        <div class="diff-kind">${this._escapeHtml(this._formatDiffKind(entry.kind))}</div>
+        <div class="diff-path">${this._escapeHtml(entry.path)}</div>
+        ${sourceValue}
+        ${haValue}
+      </li>
+    `;
+  }
+
+  _renderDiffValue(label, value) {
+    const serialized = serializeDiffValue(value);
+    const truncated = serialized.truncated ? " (truncated)" : "";
+    return `
+      <div class="diff-value">
+        <div class="diff-value-label">${this._escapeHtml(label)}${truncated}</div>
+        <pre>${this._escapeHtml(serialized.text)}</pre>
+      </div>
+    `;
+  }
+
+  _formatDiffKind(kind) {
+    if (kind === "source_only") {
+      return "SOURCE ONLY";
+    }
+    if (kind === "ha_only") {
+      return "HA ONLY";
+    }
+    return "CHANGED";
+  }
+
   _renderUnsupportedList(dashboards) {
     if (
       this._dashboardLoading ||
@@ -1528,6 +1873,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .compare-status {
+          margin-bottom: 16px;
+        }
+
         .sync-status {
           margin: 16px 0;
         }
@@ -1545,6 +1894,66 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .source-actions {
           grid-template-columns: repeat(auto-fit, minmax(140px, max-content));
+        }
+
+        .diff-group {
+          display: grid;
+          gap: 12px;
+          margin-top: 16px;
+        }
+
+        .diff-group h3 {
+          margin: 0;
+          font-size: 16px;
+          font-weight: 500;
+        }
+
+        .diff-subtitle {
+          margin: 0;
+          color: var(--secondary-text-color);
+        }
+
+        .diff-list {
+          display: grid;
+          gap: 12px;
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+
+        .diff-entry {
+          display: grid;
+          gap: 10px;
+          padding: 16px;
+          border-radius: 8px;
+          border: 1px solid var(--divider-color);
+          background: var(--card-background-color);
+        }
+
+        .diff-kind {
+          width: max-content;
+          padding: 4px 8px;
+          border-radius: 4px;
+          color: var(--text-primary-color);
+          background: var(--primary-color);
+          font-size: 12px;
+          font-weight: 500;
+          letter-spacing: 0;
+        }
+
+        .diff-path {
+          font-family: var(--code-font-family, monospace);
+          overflow-wrap: anywhere;
+        }
+
+        .diff-value {
+          display: grid;
+          gap: 6px;
+        }
+
+        .diff-value-label {
+          color: var(--secondary-text-color);
+          font-size: 13px;
         }
 
         label {
@@ -1642,6 +2051,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ${this._renderValidationSection()}
         ${this._renderDeploymentSection()}
         ${this._renderSyncSection()}
+        ${this._renderCompareSection()}
       </section>
     `;
 
@@ -1681,20 +2091,32 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .getElementById("refresh-sync-status")
       ?.addEventListener("click", () => this._refreshSyncStatus({ reloadHa: true }));
 
+    this.shadowRoot
+      .getElementById("compare-source-ha")
+      ?.addEventListener("click", () => this._compareSourceToHa());
+
     const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
     if (sourceTextarea) {
       sourceTextarea.value = this._sourceText;
       sourceTextarea.addEventListener("input", (event) => {
         this._sourceText = event.target.value;
         this._clearValidation();
+        this._clearComparison(
+          this._hasUnsavedSourceChanges()
+            ? "Comparison uses saved Source; current editor has unsaved changes."
+            : null
+        );
         this._scheduleSyncRefresh();
         const statusValue = this.shadowRoot.getElementById("source-status-value");
         const validationStatus = this.shadowRoot.getElementById(
           "validation-status-value"
         );
         const validationBody = this.shadowRoot.getElementById("validation-body");
+        const compareStatus = this.shadowRoot.getElementById("compare-status-value");
+        const compareBody = this.shadowRoot.getElementById("compare-body");
         const saveButton = this.shadowRoot.getElementById("save-source-document");
         const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
+        const compareButton = this.shadowRoot.getElementById("compare-source-ha");
 
         if (statusValue) {
           statusValue.textContent = this._hasUnsavedSourceChanges()
@@ -1711,6 +2133,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           validationBody.innerHTML = this._renderValidationBody();
         }
 
+        if (compareStatus) {
+          compareStatus.textContent = this._compareStatus;
+          compareStatus.className = "";
+        }
+
+        if (compareBody) {
+          compareBody.innerHTML = this._renderCompareBody();
+        }
+
         if (saveButton) {
           saveButton.disabled = !this._hasUnsavedSourceChanges();
         }
@@ -1719,6 +2150,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           deployButton.disabled =
             this._hasUnsavedSourceChanges() ||
             this._sourceText.length === 0 ||
+            this._isDeploymentInProgress();
+        }
+
+        if (compareButton) {
+          compareButton.disabled =
+            this._hasUnsavedSourceChanges() ||
+            this._compareStatus === "Loading" ||
             this._isDeploymentInProgress();
         }
       });
@@ -1737,5 +2175,7 @@ class DeploymentBlockedError extends Error {
     this.status = status;
   }
 }
+
+class CompareBlockedError extends Error {}
 
 customElements.define("ha-yaml-source-editor-panel", HaYamlSourceEditorPanel);

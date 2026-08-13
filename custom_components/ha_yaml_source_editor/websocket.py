@@ -216,6 +216,7 @@ async def websocket_documents_save_source(
         vol.Required("source_semantic_hash"): str,
         vol.Required("ha_semantic_hash"): str,
         vol.Required("home_assistant_version"): str,
+        vol.Optional("deployed_canonical_json", default=None): vol.Any(str, None),
     }
 )
 @websocket_api.async_response
@@ -232,6 +233,7 @@ async def websocket_documents_record_deployment(
             msg["source_semantic_hash"],
             msg["ha_semantic_hash"],
             msg["home_assistant_version"],
+            msg["deployed_canonical_json"],
         )
     except DocumentNotFoundError:
         connection.send_error(msg["id"], "not_found", "Source Document not found.")
