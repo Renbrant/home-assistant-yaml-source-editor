@@ -53,6 +53,25 @@ only after user confirmation and semantic round-trip verification.
   - `Overwrite HA with Saved Source`, gated by a fresh Compare snapshot.
 - No direct `.storage` file writes.
 
+## Professional Source Editor
+
+The Source editor uses CodeMirror 6 to provide a code-editor experience while
+preserving HA YAML Source Editor's lossless Source principle.
+
+Editor features include YAML syntax highlighting, line numbers, folding,
+indentation guides, search and replace, Tab/Shift+Tab indentation, undo/redo,
+active-line highlighting, and a status bar.
+
+These are editing conveniences only.
+
+The editor text itself remains the Source. Saving does not automatically format,
+normalize, trim, parse-and-dump, reorder, or otherwise rewrite the YAML.
+
+Comments, blank lines, indentation, quoting choices, ordering, and manual
+organization remain under the user's control.
+
+CodeMirror and its required runtime modules are vendored with the integration.
+There is no CDN or runtime network dependency for the editor.
 ## Supported Targets in v0.1
 
 Supported:
@@ -322,7 +341,7 @@ Documents stored by Home Assistant.
 ## Known Limitations
 
 - v0.1 supports persisted Storage Mode Lovelace dashboards only.
-- The browser textarea uses LF as the canonical editor newline representation.
+- The Source editor uses LF as its canonical newline representation.
 - HA Import is lossy.
 - There is no automatic merge.
 - There is no rollback or deployment history.
