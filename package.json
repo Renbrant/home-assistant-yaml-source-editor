@@ -2,6 +2,7 @@
   "name": "home-assistant-yaml-source-editor",
   "private": true,
   "scripts": {
+    "check:js": "node scripts/check-js.mjs",
     "test": "node --test",
     "vendor:js-yaml": "node scripts/vendor-js-yaml.mjs"
   },
