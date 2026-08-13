@@ -2,7 +2,7 @@
 
 ![HA YAML Source Editor banner](Photos/Banner.png)
 
-Keep your YAML. Keep the Home Assistant UI.
+**Keep your YAML. Keep the Home Assistant UI.**
 
 HA YAML Source Editor is a Home Assistant custom integration for people who
 prefer hand-authored Lovelace YAML but still want to use Home Assistant's
@@ -21,7 +21,7 @@ Lovelace WebSocket API.
 
 ## Core Principle
 
-Source YAML is the source of truth.
+**Source YAML is the source of truth.**
 
 Normal workflows never regenerate Source YAML from parsed data. The explicit
 `Import HA Version` action is the one documented lossy exception: it converts
@@ -35,7 +35,7 @@ only after user confirmation and semantic round-trip verification.
 - Read-only display of current Home Assistant dashboard configuration.
 - One Source Document per supported dashboard.
 - Raw Source YAML persistence using Home Assistant Store.
-- Explicit Save Source action.
+- Explicit `Save Source` action.
 - Source YAML validation for syntax, JSON/WebSocket compatibility, basic
   Lovelace structure, and target availability.
 - Source text hash, Source semantic hash, and current Home Assistant semantic
@@ -49,8 +49,8 @@ only after user confirmation and semantic round-trip verification.
 - Legacy two-way compare for baselines created before semantic snapshots.
 - Snapshot-backed three-way analysis for newer baselines.
 - Explicit conflict resolution:
-  - Import HA Version, which is lossy and does not modify Home Assistant.
-  - Overwrite HA with Saved Source, gated by a fresh Compare snapshot.
+  - `Import HA Version`, which is lossy and does not modify Home Assistant.
+  - `Overwrite HA with Saved Source`, gated by a fresh Compare snapshot.
 - No direct `.storage` file writes.
 
 ## Supported Targets in v0.1
@@ -71,23 +71,78 @@ Not supported in v0.1:
 
 ## Installation
 
-### HACS Custom Repository
+### HACS Custom Repository — Recommended
 
-This integration is not in the default HACS catalog yet.
+HA YAML Source Editor is available through HACS as a **Custom Repository**.
 
-1. Open HACS.
-2. Add this GitHub repository as a Custom repository.
-3. Select category `Integration`.
-4. Download the integration.
-5. Restart Home Assistant.
-6. Go to Settings -> Devices & services -> Add integration.
-7. Search for `HA YAML Source Editor`.
-8. Add it.
-9. Open the `HA YAML Source Editor` sidebar panel as an admin user.
+The integration is not yet included in the default HACS catalog, so the
+repository must be added manually the first time.
+
+#### 1. Add the repository to HACS
+
+Open **HACS** in Home Assistant.
+
+Click the **three-dot menu (⋮)** in the upper-right corner and select:
+
+**Custom repositories**
+
+Enter the following information:
+
+- **Repository:** `https://github.com/Renbrant/home-assistant-yaml-source-editor`
+- **Type:** `Integration`
+
+Then click **ADD**.
+
+#### 2. Download HA YAML Source Editor
+
+After adding the repository:
+
+1. Search HACS for **HA YAML Source Editor**.
+2. Open the integration.
+3. Click **Download**.
+4. Select the latest version if HACS asks which version to install.
+5. Wait for HACS to finish installing the integration.
+
+HACS installs the integration under Home Assistant's `custom_components`
+directory.
+
+#### 3. Restart Home Assistant
+
+After the download finishes, restart Home Assistant.
+
+Go to:
+
+**Settings → System → Restart Home Assistant**
+
+A restart is required because HA YAML Source Editor contains a Python custom
+integration.
+
+#### 4. Add the integration
+
+After Home Assistant restarts:
+
+1. Go to **Settings → Devices & services**.
+2. Click **Add integration**.
+3. Search for **HA YAML Source Editor**.
+4. Select it and complete the setup.
+
+If the integration does not appear immediately, perform a hard refresh of the
+browser (`Ctrl+F5`) and try again.
+
+#### 5. Open HA YAML Source Editor
+
+After setup, **HA YAML Source Editor** will appear in the Home Assistant sidebar
+for administrator users.
+
+Open it, select a supported Storage Mode dashboard, and create your first Source
+Document.
 
 ### Manual Installation
 
-Copy:
+HACS is the recommended installation method, but manual installation is also
+possible.
+
+Download or clone this repository and copy:
 
 ```text
 custom_components/ha_yaml_source_editor
@@ -99,12 +154,35 @@ into:
 <config>/custom_components/
 ```
 
-Restart Home Assistant, then add `HA YAML Source Editor` from Settings ->
-Devices & services.
+The resulting structure should look similar to:
+
+```text
+<config>/
+└── custom_components/
+    └── ha_yaml_source_editor/
+        ├── __init__.py
+        ├── manifest.json
+        ├── config_flow.py
+        └── ...
+```
+
+Restart Home Assistant.
+
+Then go to:
+
+**Settings → Devices & services → Add integration**
+
+Search for:
+
+```text
+HA YAML Source Editor
+```
+
+and complete the setup.
 
 ## First Source Document
 
-1. Open the sidebar panel.
+1. Open the `HA YAML Source Editor` sidebar panel.
 2. Select an existing persisted Storage Mode dashboard.
 3. Create a Source Document.
 4. Paste or write Source YAML for that dashboard.
@@ -117,9 +195,10 @@ Source Documents are intended for YAML you want to maintain directly.
 
 If you already have a dashboard built in Home Assistant and want to adopt its
 current configuration, use `Compare Source vs HA` followed by the explicit
-`Import HA Version` action. That path is intentionally lossy: comments,
-formatting, and manual YAML organization that Home Assistant does not know about
-cannot be recovered.
+`Import HA Version` action.
+
+That path is intentionally lossy: comments, formatting, and manual YAML
+organization that Home Assistant does not know about cannot be recovered.
 
 ## Validation
 
@@ -165,15 +244,18 @@ Assistant's native `lovelace/config/save` WebSocket command, verifies the
 result, and records a baseline only after verification succeeds.
 
 The Home Assistant Lovelace save API does not provide compare-and-swap or ETag
-locking. HA YAML Source Editor uses optimistic pre-save rechecks to narrow the
-race window, but it cannot claim atomic locking of Home Assistant's dashboard
-state.
+locking.
+
+HA YAML Source Editor uses optimistic pre-save rechecks to narrow the race
+window, but it cannot claim atomic locking of Home Assistant's dashboard state.
 
 ## Compare
 
-Compare is semantic. It compares parsed saved Source configuration with the
-current normalized Home Assistant configuration. It does not line-diff Source
-YAML against Home Assistant JSON.
+Compare is semantic.
+
+It compares parsed saved Source configuration with the current normalized Home
+Assistant configuration. It does not line-diff Source YAML against Home
+Assistant JSON.
 
 Comments, whitespace, quoting, and formatting are not part of semantic compare.
 
@@ -187,12 +269,15 @@ may show multiple indexed changes instead of recognizing a move.
 `Import HA Version` chooses the current Home Assistant dashboard configuration
 as the new Source.
 
-This is explicitly lossy. It may replace comments, blank lines, quoting,
-formatting, and manual YAML organization. It does not modify Home Assistant.
+This is explicitly lossy.
+
+It may replace comments, blank lines, quoting, formatting, and manual YAML
+organization. It does not modify Home Assistant.
 
 Before saving, the generated YAML is parsed and compared semantically with the
-Home Assistant configuration. If the round trip changes semantics, the import is
-blocked.
+Home Assistant configuration.
+
+If the round trip changes semantics, the import is blocked.
 
 ### Overwrite HA with Saved Source
 
@@ -201,20 +286,27 @@ replaces the exact Home Assistant dashboard configuration that was reviewed in
 Compare.
 
 It requires a fresh Compare snapshot and is only available for HA conflict
-states. If Source or Home Assistant changes after Compare, the overwrite is
-blocked and Compare must be run again.
+states.
+
+If Source or Home Assistant changes after Compare, the overwrite is blocked and
+Compare must be run again.
 
 ## Data and Storage
 
-Source Documents are stored using Home Assistant Store. The integration does not
-write directly to `.storage` files.
+Source Documents are stored using Home Assistant Store.
 
-Source YAML and dashboard configuration can contain sensitive information. Do
-not include raw Source, Home Assistant configuration, or semantic diff values in
-bug reports unless you intentionally sanitize them first.
+The integration does not write directly to `.storage` files.
+
+Source YAML and dashboard configuration can contain sensitive information.
+
+Do not include raw Source, Home Assistant configuration, or semantic diff values
+in bug reports unless you intentionally sanitize them first.
 
 Internal Store filenames and structure are implementation details, not an
 editing interface.
+
+Removing or updating the integration code does not intentionally delete Source
+Documents stored by Home Assistant.
 
 ## Security
 
@@ -224,6 +316,8 @@ editing interface.
 - No CDN or internet runtime dependency is used.
 - Source YAML, Home Assistant config, canonical snapshots, and diff values are
   not logged by the integration.
+- Dashboard writes are performed through Home Assistant's supported Lovelace
+  WebSocket API.
 
 ## Known Limitations
 
@@ -239,49 +333,16 @@ editing interface.
 
 ## Troubleshooting
 
-- After frontend updates, clear browser cache or use Ctrl+F5.
+- After frontend updates, clear the browser cache or use `Ctrl+F5`.
 - After Python integration updates, restart Home Assistant.
-- Make sure you are using an admin user.
+- Make sure you are using an administrator user.
 - Check Home Assistant logs for integration setup errors.
 - For HACS or manual installation, verify the folder is installed at
   `<config>/custom_components/ha_yaml_source_editor`.
-- If the integration does not appear in Add integration, restart Home Assistant
-  and clear the browser cache.
+- If the integration does not appear in **Add integration**, restart Home
+  Assistant and clear the browser cache.
 
-## Development
 
-Install development dependencies:
-
-```bash
-npm ci
-```
-
-Run JavaScript tests:
-
-```bash
-npm test
-```
-
-Check JavaScript syntax:
-
-```bash
-npm run check:js
-```
-
-Verify vendored js-yaml reproducibility:
-
-```bash
-npm ci
-npm run vendor:js-yaml
-git diff --exit-code -- custom_components/ha_yaml_source_editor/frontend/vendor/
-```
-
-Run Python validation:
-
-```bash
-python -m compileall custom_components
-python -m unittest discover -s test -p "*_test.py"
-```
 
 ## License
 
