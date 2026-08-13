@@ -28,9 +28,18 @@ test("manifest metadata is truthful for a custom integration service", async () 
   assert.equal(manifest.config_flow, true);
   assert.equal(manifest.single_config_entry, true);
   assert.equal(manifest.integration_type, "service");
-  assert.equal("iot_class" in manifest, false);
-  assert.deepEqual(manifest.dependencies, ["frontend", "panel_custom"]);
+  assert.equal(manifest.iot_class, "calculated");
+  assert.deepEqual(manifest.dependencies, ["frontend", "http", "panel_custom"]);
   assert.deepEqual(manifest.codeowners, ["@Renbrant"]);
+});
+
+test("integration declares config-entry-only YAML schema", async () => {
+  const init = await readFile(join(integrationDir, "__init__.py"), "utf8");
+
+  assert.match(
+    init,
+    /CONFIG_SCHEMA = cv\.config_entry_only_config_schema\(DOMAIN\)/,
+  );
 });
 
 test("custom integration English translations are complete without strings.json", async () => {
