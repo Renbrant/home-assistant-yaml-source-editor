@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   analyzeThreeWay,
   diffSemantic,
+  formatDiffKindForLabels,
 } from "../custom_components/ha_yaml_source_editor/frontend/semantic-diff.mjs";
 
 test("equal objects with different key order produce no differences", () => {
@@ -147,4 +148,118 @@ test("three-way analysis reports both sides changed", () => {
   assert.equal(result.sourceChanges.entries.length, 1);
   assert.equal(result.haChanges.entries.length, 1);
   assert.equal(result.currentDifference.entries.length, 1);
+});
+
+test("field added to Saved Source after deployment is presented as added", () => {
+  const result = analyzeThreeWay({
+    baselineValue: {},
+    sourceValue: { title: "Saved" },
+    haValue: {},
+  });
+  const entry = result.sourceChanges.entries[0];
+
+  assert.equal(entry.kind, "ha_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Last deployed",
+      haLabel: "Saved Source",
+    }),
+    "ADDED",
+  );
+});
+
+test("field removed from Saved Source after deployment is presented as removed", () => {
+  const result = analyzeThreeWay({
+    baselineValue: { title: "Old" },
+    sourceValue: {},
+    haValue: { title: "Old" },
+  });
+  const entry = result.sourceChanges.entries[0];
+
+  assert.equal(entry.kind, "source_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Last deployed",
+      haLabel: "Saved Source",
+    }),
+    "REMOVED",
+  );
+});
+
+test("field added directly in HA is presented as added", () => {
+  const result = analyzeThreeWay({
+    baselineValue: {},
+    sourceValue: {},
+    haValue: { title: "HA" },
+  });
+  const entry = result.haChanges.entries[0];
+
+  assert.equal(entry.kind, "ha_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Last deployed",
+      haLabel: "Current HA",
+    }),
+    "ADDED",
+  );
+});
+
+test("field removed directly in HA is presented as removed", () => {
+  const result = analyzeThreeWay({
+    baselineValue: { title: "Old" },
+    sourceValue: { title: "Old" },
+    haValue: {},
+  });
+  const entry = result.haChanges.entries[0];
+
+  assert.equal(entry.kind, "source_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Last deployed",
+      haLabel: "Current HA",
+    }),
+    "REMOVED",
+  );
+});
+
+test("changed value is presented as changed", () => {
+  const result = diffSemantic({ title: "Source" }, { title: "HA" });
+  const entry = result.entries[0];
+
+  assert.equal(entry.kind, "changed");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Saved Source",
+      haLabel: "Current HA",
+    }),
+    "CHANGED",
+  );
+});
+
+test("direct Source vs HA source-only field keeps source-only label", () => {
+  const result = diffSemantic({ title: "Source" }, {});
+  const entry = result.entries[0];
+
+  assert.equal(entry.kind, "source_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Saved Source",
+      haLabel: "Current HA",
+    }),
+    "SOURCE ONLY",
+  );
+});
+
+test("direct Source vs HA HA-only field keeps HA-only label", () => {
+  const result = diffSemantic({}, { title: "HA" });
+  const entry = result.entries[0];
+
+  assert.equal(entry.kind, "ha_only");
+  assert.equal(
+    formatDiffKindForLabels(entry.kind, {
+      sourceLabel: "Saved Source",
+      haLabel: "Current HA",
+    }),
+    "HA ONLY",
+  );
 });

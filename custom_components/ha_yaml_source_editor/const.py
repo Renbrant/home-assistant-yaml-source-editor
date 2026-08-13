@@ -3,11 +3,17 @@
 DOMAIN = "ha_yaml_source_editor"
 NAME = "HA YAML Source Editor"
 VERSION = "0.1.0"
+PANEL_FRONTEND_REVISION = 1
+PANEL_ASSET_IDENTITY = f"{VERSION}-r{PANEL_FRONTEND_REVISION}"
 
 PANEL_URL_PATH = "ha-yaml-source-editor"
-PANEL_WEB_COMPONENT = "ha-yaml-source-editor-panel"
+PANEL_WEB_COMPONENT = (
+    f"ha-yaml-source-editor-panel-{PANEL_ASSET_IDENTITY.replace('.', '-')}"
+)
 PANEL_STATIC_PATH = f"/{DOMAIN}/frontend"
-PANEL_MODULE_URL = f"{PANEL_STATIC_PATH}/ha-yaml-source-editor-panel.js"
+PANEL_MODULE_URL = (
+    f"{PANEL_STATIC_PATH}/ha-yaml-source-editor-panel.js?v={PANEL_ASSET_IDENTITY}"
+)
 PANEL_ICON = "mdi:file-code-outline"
 
 WS_TYPE_STATUS = f"{DOMAIN}/status"

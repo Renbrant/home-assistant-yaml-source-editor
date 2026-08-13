@@ -38,6 +38,17 @@ test("HA import module is the only application YAML dump caller", async () => {
   );
 });
 
+test("source edit sync refresh updates UI without remounting the panel", async () => {
+  const panel = await readFile(
+    join(integrationDir, "frontend", "ha-yaml-source-editor-panel.js"),
+    "utf8",
+  );
+  const syncRefreshBody = methodBody(panel, "async _refreshSyncStatus");
+
+  assert.match(syncRefreshBody, /this\._refreshSyncUi\(\)/);
+  assert.doesNotMatch(syncRefreshBody, /this\._render\(\)/);
+});
+
 async function appFiles(dir = integrationDir) {
   const entries = await readdir(dir, { withFileTypes: true });
   const files = [];
@@ -74,4 +85,29 @@ async function grep(files, pattern) {
     }
   }
   return hits;
+}
+
+function methodBody(source, signature) {
+  const start = source.indexOf(signature);
+  assert.notEqual(start, -1, `Missing method: ${signature}`);
+
+  const methodOpen = source.indexOf(") {", start);
+  assert.notEqual(methodOpen, -1, `Missing method body: ${signature}`);
+  const bodyStart = methodOpen + 2;
+  assert.notEqual(bodyStart, -1, `Missing method body: ${signature}`);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(bodyStart + 1, index);
+      }
+    }
+  }
+
+  throw new Error(`Unterminated method body: ${signature}`);
 }
