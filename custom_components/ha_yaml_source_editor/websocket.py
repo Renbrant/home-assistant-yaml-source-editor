@@ -19,14 +19,17 @@ from .const import (
     WS_TYPE_DOCUMENTS_CREATE,
     WS_TYPE_DOCUMENTS_GET,
     WS_TYPE_DOCUMENTS_LIST,
+    WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT,
     WS_TYPE_DOCUMENTS_SAVE_SOURCE,
     WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
 )
 from .document_store import (
     DocumentAlreadyExistsError,
+    DocumentChangedError,
     DocumentNotFoundError,
     DocumentStoreError,
+    InvalidDeploymentBaselineError,
     InvalidTargetError,
     SourceDocumentStore,
     SourceTextTooLargeError,
@@ -41,6 +44,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_get)
     websocket_api.async_register_command(hass, websocket_documents_create)
     websocket_api.async_register_command(hass, websocket_documents_save_source)
+    websocket_api.async_register_command(hass, websocket_documents_record_deployment)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
 
 
@@ -198,6 +202,56 @@ async def websocket_documents_save_source(
         return
     except DocumentStoreError:
         connection.send_error(msg["id"], "store_error", "Unable to save Source Document.")
+        return
+
+    connection.send_result(msg["id"], {"document": document})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT,
+        vol.Required("document_id"): str,
+        vol.Required("expected_source_updated_at"): str,
+        vol.Required("source_semantic_hash"): str,
+        vol.Required("ha_semantic_hash"): str,
+        vol.Required("home_assistant_version"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_documents_record_deployment(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Record a deployment baseline after verified Lovelace deployment."""
+    try:
+        document = await _document_store(hass).async_record_deployment(
+            msg["document_id"],
+            msg["expected_source_updated_at"],
+            msg["source_semantic_hash"],
+            msg["ha_semantic_hash"],
+            msg["home_assistant_version"],
+        )
+    except DocumentNotFoundError:
+        connection.send_error(msg["id"], "not_found", "Source Document not found.")
+        return
+    except DocumentChangedError:
+        connection.send_error(
+            msg["id"],
+            "document_changed",
+            "Source Document changed during deployment.",
+        )
+        return
+    except InvalidDeploymentBaselineError as err:
+        connection.send_error(msg["id"], "invalid_baseline", str(err))
+        return
+    except DocumentStoreError:
+        connection.send_error(
+            msg["id"],
+            "store_error",
+            "Unable to record deployment baseline.",
+        )
         return
 
     connection.send_result(msg["id"], {"document": document})

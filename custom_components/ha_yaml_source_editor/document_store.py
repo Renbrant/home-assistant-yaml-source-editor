@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -17,6 +18,10 @@ from .const import (
     DOCUMENT_TARGET_TYPE_LOVELACE_STORAGE_DASHBOARD,
     MAX_SOURCE_TEXT_BYTES,
 )
+from .hashing import sha256_text
+
+
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class DocumentStoreError(Exception):
@@ -42,6 +47,14 @@ class SourceTextTooLargeError(DocumentStoreError):
 
 class InvalidTargetError(DocumentStoreError):
     """Raised when a Source Document target is invalid."""
+
+
+class DocumentChangedError(DocumentStoreError):
+    """Raised when the Source Document changed during deployment."""
+
+
+class InvalidDeploymentBaselineError(DocumentStoreError):
+    """Raised when deployment baseline data is invalid."""
 
 
 class SourceDocumentStore:
@@ -125,6 +138,39 @@ class SourceDocumentStore:
             await self._store.async_save(data)
             return self._document_with_defaults(document)
 
+    async def async_record_deployment(
+        self,
+        document_id: str,
+        expected_source_updated_at: str,
+        source_semantic_hash: str,
+        ha_semantic_hash: str,
+        home_assistant_version: str,
+    ) -> dict[str, Any]:
+        """Record a verified deployment baseline without changing source text."""
+        self._validate_hash(source_semantic_hash, "source_semantic_hash")
+        self._validate_hash(ha_semantic_hash, "ha_semantic_hash")
+        if not isinstance(home_assistant_version, str) or not home_assistant_version:
+            raise InvalidDeploymentBaselineError("Home Assistant version is required.")
+
+        async with self._lock:
+            data = await self._async_get_data_unlocked()
+            document = data["documents"].get(document_id)
+            if document is None:
+                raise DocumentNotFoundError("Source Document not found.")
+            if document["updated_at"] != expected_source_updated_at:
+                raise DocumentChangedError("Source Document changed during deployment.")
+
+            document["deployment_baseline"] = {
+                "deployed_at": self._now(),
+                "source_text_hash": sha256_text(document["source_text"]),
+                "source_semantic_hash": source_semantic_hash,
+                "ha_semantic_hash": ha_semantic_hash,
+                "home_assistant_version": home_assistant_version,
+            }
+            document["updated_at"] = self._now()
+            await self._store.async_save(data)
+            return self._document_with_defaults(document)
+
     async def _async_get_data(self) -> dict[str, Any]:
         """Return loaded store data."""
         async with self._lock:
@@ -175,6 +221,11 @@ class SourceDocumentStore:
         """Validate source text without transforming it."""
         if len(source_text.encode("utf-8")) > MAX_SOURCE_TEXT_BYTES:
             raise SourceTextTooLargeError("Source Document exceeds the 2 MiB limit.")
+
+    def _validate_hash(self, value: str, field: str) -> None:
+        """Validate a lowercase SHA-256 hex digest."""
+        if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+            raise InvalidDeploymentBaselineError(f"{field} must be a SHA-256 hash.")
 
     def _now(self) -> str:
         """Return an ISO timestamp."""

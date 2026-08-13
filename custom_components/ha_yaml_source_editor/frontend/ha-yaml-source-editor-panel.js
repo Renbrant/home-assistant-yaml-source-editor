@@ -5,6 +5,12 @@ import {
   compareSourceToHa,
   shortHash,
 } from "./sync-state.mjs";
+import {
+  DEPLOYMENT_OPERATION,
+  assessDeploymentPreflight,
+  verifyFinalHaRead,
+  verifyPostSave,
+} from "./deployment-logic.mjs";
 
 class HaYamlSourceEditorPanel extends HTMLElement {
   constructor() {
@@ -43,6 +49,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._haSemanticHash = null;
     this._syncRequestId = 0;
     this._syncDebounce = null;
+    this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
+    this._deploymentMessage = null;
+    this._deploymentRequestId = 0;
   }
 
   set hass(hass) {
@@ -115,6 +124,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshDashboards() {
+    if (this._isDeploymentInProgress()) {
+      this._deploymentMessage = "Deployment is in progress.";
+      this._render();
+      return;
+    }
+
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
     }
@@ -138,6 +153,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId += 1;
     this._clearValidation();
     this._clearSyncState();
+    this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
+    this._deploymentMessage = null;
+    this._deploymentRequestId += 1;
   }
 
   _escapeHtml(value) {
@@ -232,6 +250,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _selectDashboard(dashboard) {
+    if (this._isDeploymentInProgress()) {
+      this._deploymentMessage = "Deployment is in progress.";
+      this._render();
+      return;
+    }
+
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
     }
@@ -251,6 +275,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceError = null;
     this._clearValidation();
     this._clearSyncState();
+    this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
+    this._deploymentMessage = null;
+    this._deploymentRequestId += 1;
     this._render();
 
     this._loadDashboardConfig(dashboard, requestId);
@@ -423,6 +450,231 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._render();
   }
 
+  async _deploySavedSource() {
+    if (
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._isDeploymentInProgress()
+    ) {
+      return;
+    }
+
+    const requestId = this._deploymentRequestId + 1;
+    this._deploymentRequestId = requestId;
+    this._deploymentStatus = DEPLOYMENT_OPERATION.PREFLIGHT;
+    this._deploymentMessage = null;
+    this._render();
+
+    try {
+      if (this._hasUnsavedSourceChanges()) {
+        throw new DeploymentBlockedError(
+          "Save Source before deploying.",
+          DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+
+      const freshDocument = await this._fetchSourceDocument(
+        this._sourceDocument.document_id
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const sourceAnalysis = analyzeSourceText(freshDocument.source_text);
+      const targetResult = await this._validateSelectedTarget();
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      if (!targetResult.valid || !sourceAnalysis.validation.valid) {
+        const preflight = assessDeploymentPreflight({
+          sourceValid: sourceAnalysis.validation.valid,
+          hasUnsavedChanges: this._hasUnsavedSourceChanges(),
+          savedSourceText: this._sourceText,
+          backendSourceText: freshDocument.source_text,
+          deploymentBaseline: freshDocument.deployment_baseline ?? null,
+          preflightHaSemanticHash: null,
+        });
+        throw new DeploymentBlockedError(
+          targetResult.valid
+            ? preflight.message
+            : targetResult.message,
+          DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+
+      const deploymentSourceSemanticHash = await this._hashText(
+        canonicalJson(sourceAnalysis.parsedConfig)
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const preflightHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const initialPreflightHaHash = await this._hashText(
+        canonicalJson(preflightHaConfig)
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const deploymentBaseline = freshDocument.deployment_baseline ?? null;
+      const preflight = assessDeploymentPreflight({
+        sourceValid: sourceAnalysis.validation.valid,
+        hasUnsavedChanges: this._hasUnsavedSourceChanges(),
+        savedSourceText: this._sourceText,
+        backendSourceText: freshDocument.source_text,
+        deploymentBaseline,
+        preflightHaSemanticHash: initialPreflightHaHash,
+      });
+
+      if (!preflight.allowed) {
+        throw new DeploymentBlockedError(
+          preflight.message,
+          preflight.reason === "ha_conflict"
+            ? DEPLOYMENT_OPERATION.CONFLICT
+            : DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+
+      this._deploymentStatus = DEPLOYMENT_OPERATION.AWAITING_CONFIRMATION;
+      this._deploymentMessage = preflight.firstDeployment
+        ? "First deployment requires confirmation."
+        : "Deployment preflight passed.";
+      this._render();
+
+      if (!this._confirmDeployment(preflight.firstDeployment)) {
+        this._deploymentStatus = DEPLOYMENT_OPERATION.IDLE;
+        this._deploymentMessage = "Deployment cancelled.";
+        this._render();
+        return;
+      }
+
+      const latestHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const latestHaHash = await this._hashText(canonicalJson(latestHaConfig));
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      // Lovelace save has no compare-and-swap option; this re-read narrows the race window.
+      const finalCheck = verifyFinalHaRead({
+        deploymentBaseline,
+        initialPreflightHaHash,
+        latestHaHash,
+      });
+      if (!finalCheck.allowed) {
+        throw new DeploymentBlockedError(
+          finalCheck.message,
+          DEPLOYMENT_OPERATION.CONFLICT
+        );
+      }
+
+      this._deploymentStatus = DEPLOYMENT_OPERATION.DEPLOYING;
+      this._deploymentMessage = "Writing saved Source to Home Assistant.";
+      this._render();
+
+      await this._hass.callWS({
+        type: "lovelace/config/save",
+        url_path: this._dashboardTargetUrlPath(this._selectedDashboard),
+        config: sourceAnalysis.parsedConfig,
+      });
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      this._deploymentStatus = DEPLOYMENT_OPERATION.VERIFYING;
+      this._deploymentMessage = "Verifying saved dashboard configuration.";
+      this._render();
+
+      const verifiedHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const verifiedHaHash = await this._hashText(canonicalJson(verifiedHaConfig));
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const postSave = verifyPostSave({
+        verifiedHaSemanticHash: verifiedHaHash,
+        deploymentSourceSemanticHash,
+      });
+      if (!postSave.verified) {
+        throw new DeploymentBlockedError(
+          postSave.message,
+          DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+
+      this._deploymentStatus = DEPLOYMENT_OPERATION.RECORDING_BASELINE;
+      this._deploymentMessage = "Recording deployment baseline.";
+      this._render();
+
+      let recordResult;
+      try {
+        recordResult = await this._hass.connection.sendMessagePromise({
+          type: "ha_yaml_source_editor/documents/record_deployment",
+          document_id: freshDocument.document_id,
+          expected_source_updated_at: freshDocument.updated_at,
+          source_semantic_hash: deploymentSourceSemanticHash,
+          ha_semantic_hash: verifiedHaHash,
+          home_assistant_version:
+            this._status?.home_assistant_version ?? "unknown",
+        });
+      } catch (_err) {
+        throw new DeploymentBlockedError(
+          "Dashboard deployment was verified, but the deployment baseline could not be recorded. Home Assistant has been changed, but synchronization tracking is incomplete. Refresh before attempting another deployment.",
+          DEPLOYMENT_OPERATION.ERROR
+        );
+      }
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      const refreshedDocument = await this._fetchSourceDocument(
+        recordResult.document.document_id
+      );
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      this._sourceDocument = refreshedDocument;
+      this._sourceText = refreshedDocument.source_text;
+      this._lastSavedSourceText = refreshedDocument.source_text;
+      this._config = verifiedHaConfig;
+      this._configStatus = "Loaded";
+      this._deploymentStatus = DEPLOYMENT_OPERATION.SUCCESS;
+      this._deploymentMessage = "Deployment verified and baseline recorded.";
+      await this._refreshSyncStatus({ reloadHa: true });
+    } catch (err) {
+      if (requestId !== this._deploymentRequestId) {
+        return;
+      }
+
+      this._deploymentStatus = err.status ?? DEPLOYMENT_OPERATION.ERROR;
+      this._deploymentMessage = err?.message || "Deployment failed.";
+      this._render();
+    }
+  }
+
   async _validateSourceDocument() {
     if (
       !this._sourceDocument ||
@@ -501,6 +753,33 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     return { valid: true };
+  }
+
+  async _fetchSourceDocument(documentId) {
+    const result = await this._hass.connection.sendMessagePromise({
+      type: "ha_yaml_source_editor/documents/get",
+      document_id: documentId,
+    });
+    return result.document;
+  }
+
+  _isDeploymentInProgress() {
+    return [
+      DEPLOYMENT_OPERATION.PREFLIGHT,
+      DEPLOYMENT_OPERATION.AWAITING_CONFIRMATION,
+      DEPLOYMENT_OPERATION.DEPLOYING,
+      DEPLOYMENT_OPERATION.VERIFYING,
+      DEPLOYMENT_OPERATION.RECORDING_BASELINE,
+    ].includes(this._deploymentStatus);
+  }
+
+  _confirmDeployment(firstDeployment) {
+    const dashboardPath = this._dashboardPath(this._selectedDashboard);
+    const message = firstDeployment
+      ? `Deploy saved Source YAML to ${dashboardPath}? This is the first deployment baseline for this Source Document.`
+      : `Deploy saved Source YAML to ${dashboardPath}?`;
+
+    return window.confirm(message);
   }
 
   _scheduleSyncRefresh() {
@@ -601,7 +880,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return result.sha256;
   }
 
-  async _readDashboardConfig(dashboard) {
+  async _readDashboardConfig(dashboard, { force = false } = {}) {
     const message = {
       type: "lovelace/config",
     };
@@ -609,6 +888,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     if (targetUrlPath != null) {
       message.url_path = targetUrlPath;
+    }
+
+    if (force) {
+      message.force = true;
     }
 
     return this._hass.connection.sendMessagePromise(message);
@@ -782,6 +1065,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         : "";
     const validateDisabled =
       this._validationStatus === "Validating" ? "disabled" : "";
+    const deployDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._hasUnsavedSourceChanges() ||
+      this._isDeploymentInProgress() ||
+      this._sourceText.length === 0
+        ? "disabled"
+        : "";
 
     return `
       <div class="source-editor">
@@ -799,6 +1090,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           </button>
           <button type="button" id="validate-source-document" ${validateDisabled}>
             Validate
+          </button>
+          <button type="button" id="deploy-saved-source" ${deployDisabled}>
+            Deploy Saved Source
           </button>
         </div>
       </div>
@@ -929,6 +1223,54 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderDeploymentSection() {
+    const statusClass =
+      this._deploymentStatus === DEPLOYMENT_OPERATION.ERROR ||
+      this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
+        ? " error"
+        : "";
+    const baseline = this._sourceDocument?.deployment_baseline ?? null;
+
+    return `
+      <section class="section">
+        <h2>Deployment</h2>
+        <dl class="deployment-status">
+          <dt>Status</dt>
+          <dd class="${statusClass.trim()}">${this._escapeHtml(
+            this._deploymentStatus
+          )}</dd>
+          <dt>Last deployed</dt>
+          <dd>${this._escapeHtml(baseline?.deployed_at ?? "-")}</dd>
+          <dt>HA baseline</dt>
+          <dd title="${this._escapeHtml(
+            baseline?.ha_semantic_hash ?? ""
+          )}">${this._escapeHtml(shortHash(baseline?.ha_semantic_hash))}</dd>
+          <dt>HA version</dt>
+          <dd>${this._escapeHtml(
+            baseline?.home_assistant_version ?? "-"
+          )}</dd>
+        </dl>
+        ${this._renderDeploymentMessage()}
+      </section>
+    `;
+  }
+
+  _renderDeploymentMessage() {
+    if (!this._deploymentMessage) {
+      return "";
+    }
+
+    const messageClass =
+      this._deploymentStatus === DEPLOYMENT_OPERATION.ERROR ||
+      this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
+        ? "state error"
+        : "state";
+
+    return `<p class="${messageClass}">${this._escapeHtml(
+      this._deploymentMessage
+    )}</p>`;
+  }
+
   _renderSyncMessage() {
     if (this._syncStatus === "Calculating") {
       return `<p class="state">Calculating hashes...</p>`;
@@ -997,7 +1339,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       (dashboard) => dashboard.mode !== "storage"
     );
     const refreshDisabled =
-      this._dashboardLoading || !this._canUseConnection() ? "disabled" : "";
+      this._dashboardLoading ||
+      !this._canUseConnection() ||
+      this._isDeploymentInProgress()
+        ? "disabled"
+        : "";
 
     this.shadowRoot.innerHTML = `
       <style>
@@ -1178,6 +1524,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin-bottom: 16px;
         }
 
+        .deployment-status {
+          margin-bottom: 16px;
+        }
+
         .sync-status {
           margin: 16px 0;
         }
@@ -1290,6 +1640,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ${this._renderConfigurationSection()}
         ${this._renderSourceDocumentSection()}
         ${this._renderValidationSection()}
+        ${this._renderDeploymentSection()}
         ${this._renderSyncSection()}
       </section>
     `;
@@ -1323,6 +1674,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       ?.addEventListener("click", () => this._validateSourceDocument());
 
     this.shadowRoot
+      .getElementById("deploy-saved-source")
+      ?.addEventListener("click", () => this._deploySavedSource());
+
+    this.shadowRoot
       .getElementById("refresh-sync-status")
       ?.addEventListener("click", () => this._refreshSyncStatus({ reloadHa: true }));
 
@@ -1339,6 +1694,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         );
         const validationBody = this.shadowRoot.getElementById("validation-body");
         const saveButton = this.shadowRoot.getElementById("save-source-document");
+        const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
 
         if (statusValue) {
           statusValue.textContent = this._hasUnsavedSourceChanges()
@@ -1358,6 +1714,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         if (saveButton) {
           saveButton.disabled = !this._hasUnsavedSourceChanges();
         }
+
+        if (deployButton) {
+          deployButton.disabled =
+            this._hasUnsavedSourceChanges() ||
+            this._sourceText.length === 0 ||
+            this._isDeploymentInProgress();
+        }
       });
     }
 
@@ -1365,6 +1728,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     if (configBlock && this._configStatus === "Loaded") {
       configBlock.textContent = JSON.stringify(this._config, null, 2);
     }
+  }
+}
+
+class DeploymentBlockedError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
   }
 }
 
