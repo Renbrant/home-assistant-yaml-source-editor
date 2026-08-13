@@ -20,11 +20,11 @@ from .const import (
 )
 from .deployment_baseline import (
     DeploymentBaselineValidationError,
-    validate_deployed_canonical_json,
+    SourceDocumentChangedError,
+    apply_ha_import_to_document,
+    build_deployment_baseline,
+    normalize_deployment_baseline,
 )
-from .hashing import sha256_text
-
-
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -154,16 +154,7 @@ class SourceDocumentStore:
         """Record a verified deployment baseline without changing source text."""
         self._validate_hash(source_semantic_hash, "source_semantic_hash")
         self._validate_hash(ha_semantic_hash, "ha_semantic_hash")
-        if not isinstance(home_assistant_version, str) or not home_assistant_version:
-            raise InvalidDeploymentBaselineError("Home Assistant version is required.")
-        try:
-            validated_deployed_canonical_json = validate_deployed_canonical_json(
-                deployed_canonical_json,
-                source_semantic_hash,
-                ha_semantic_hash,
-            )
-        except DeploymentBaselineValidationError as err:
-            raise InvalidDeploymentBaselineError(str(err)) from err
+        self._validate_home_assistant_version(home_assistant_version)
 
         async with self._lock:
             data = await self._async_get_data_unlocked()
@@ -173,20 +164,64 @@ class SourceDocumentStore:
             if document["updated_at"] != expected_source_updated_at:
                 raise DocumentChangedError("Source Document changed during deployment.")
 
-            deployment_baseline = {
-                "deployed_at": self._now(),
-                "source_text_hash": sha256_text(document["source_text"]),
-                "source_semantic_hash": source_semantic_hash,
-                "ha_semantic_hash": ha_semantic_hash,
-                "home_assistant_version": home_assistant_version,
-            }
-            if validated_deployed_canonical_json is not None:
-                deployment_baseline["deployed_canonical_json"] = (
-                    validated_deployed_canonical_json
+            timestamp = self._now()
+            try:
+                deployment_baseline = build_deployment_baseline(
+                    timestamp=timestamp,
+                    source_text=document["source_text"],
+                    source_semantic_hash=source_semantic_hash,
+                    ha_semantic_hash=ha_semantic_hash,
+                    home_assistant_version=home_assistant_version,
+                    deployed_canonical_json=deployed_canonical_json,
                 )
+            except DeploymentBaselineValidationError as err:
+                raise InvalidDeploymentBaselineError(str(err)) from err
 
             document["deployment_baseline"] = deployment_baseline
-            document["updated_at"] = self._now()
+            document["updated_at"] = timestamp
+            await self._store.async_save(data)
+            return self._document_with_defaults(document)
+
+    async def async_import_ha_version(
+        self,
+        document_id: str,
+        expected_source_updated_at: str,
+        source_text: str,
+        source_semantic_hash: str,
+        ha_semantic_hash: str,
+        ha_canonical_json: str,
+        home_assistant_version: str,
+    ) -> dict[str, Any]:
+        """Atomically replace source text with an imported HA version."""
+        self._validate_hash(source_semantic_hash, "source_semantic_hash")
+        self._validate_hash(ha_semantic_hash, "ha_semantic_hash")
+        self._validate_home_assistant_version(home_assistant_version)
+
+        async with self._lock:
+            data = await self._async_get_data_unlocked()
+            document = data["documents"].get(document_id)
+            if document is None:
+                raise DocumentNotFoundError("Source Document not found.")
+
+            timestamp = self._now()
+            try:
+                apply_ha_import_to_document(
+                    document,
+                    expected_source_updated_at=expected_source_updated_at,
+                    timestamp=timestamp,
+                    source_text=source_text,
+                    source_semantic_hash=source_semantic_hash,
+                    ha_semantic_hash=ha_semantic_hash,
+                    home_assistant_version=home_assistant_version,
+                    ha_canonical_json=ha_canonical_json,
+                )
+            except SourceDocumentChangedError as err:
+                raise DocumentChangedError(str(err)) from err
+            except DeploymentBaselineValidationError as err:
+                if "2 MiB" in str(err):
+                    raise SourceTextTooLargeError(str(err)) from err
+                raise InvalidDeploymentBaselineError(str(err)) from err
+
             await self._store.async_save(data)
             return self._document_with_defaults(document)
 
@@ -217,6 +252,9 @@ class SourceDocumentStore:
         """Return a document with additive fields defaulted without storing them."""
         result = deepcopy(document)
         result.setdefault("deployment_baseline", None)
+        result["deployment_baseline"] = normalize_deployment_baseline(
+            result["deployment_baseline"]
+        )
         return result
 
     def _find_document_for_target(
@@ -245,6 +283,11 @@ class SourceDocumentStore:
         """Validate a lowercase SHA-256 hex digest."""
         if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
             raise InvalidDeploymentBaselineError(f"{field} must be a SHA-256 hash.")
+
+    def _validate_home_assistant_version(self, home_assistant_version: str) -> None:
+        """Validate Home Assistant version metadata."""
+        if not isinstance(home_assistant_version, str) or not home_assistant_version:
+            raise InvalidDeploymentBaselineError("Home Assistant version is required.")
 
     def _now(self) -> str:
         """Return an ISO timestamp."""

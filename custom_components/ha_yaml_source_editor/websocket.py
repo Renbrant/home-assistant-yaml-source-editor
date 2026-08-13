@@ -18,6 +18,7 @@ from .const import (
     VERSION,
     WS_TYPE_DOCUMENTS_CREATE,
     WS_TYPE_DOCUMENTS_GET,
+    WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION,
     WS_TYPE_DOCUMENTS_LIST,
     WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT,
     WS_TYPE_DOCUMENTS_SAVE_SOURCE,
@@ -45,6 +46,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_create)
     websocket_api.async_register_command(hass, websocket_documents_save_source)
     websocket_api.async_register_command(hass, websocket_documents_record_deployment)
+    websocket_api.async_register_command(hass, websocket_documents_import_ha_version)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
 
 
@@ -253,6 +255,63 @@ async def websocket_documents_record_deployment(
             msg["id"],
             "store_error",
             "Unable to record deployment baseline.",
+        )
+        return
+
+    connection.send_result(msg["id"], {"document": document})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION,
+        vol.Required("document_id"): str,
+        vol.Required("expected_source_updated_at"): str,
+        vol.Required("source_text"): str,
+        vol.Required("source_semantic_hash"): str,
+        vol.Required("ha_semantic_hash"): str,
+        vol.Required("ha_canonical_json"): str,
+        vol.Required("home_assistant_version"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_documents_import_ha_version(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Atomically import current HA configuration as Source YAML."""
+    try:
+        document = await _document_store(hass).async_import_ha_version(
+            msg["document_id"],
+            msg["expected_source_updated_at"],
+            msg["source_text"],
+            msg["source_semantic_hash"],
+            msg["ha_semantic_hash"],
+            msg["ha_canonical_json"],
+            msg["home_assistant_version"],
+        )
+    except DocumentNotFoundError:
+        connection.send_error(msg["id"], "not_found", "Source Document not found.")
+        return
+    except DocumentChangedError:
+        connection.send_error(
+            msg["id"],
+            "document_changed",
+            "Source Document changed during import.",
+        )
+        return
+    except SourceTextTooLargeError as err:
+        connection.send_error(msg["id"], "source_too_large", str(err))
+        return
+    except InvalidDeploymentBaselineError as err:
+        connection.send_error(msg["id"], "invalid_baseline", str(err))
+        return
+    except DocumentStoreError:
+        connection.send_error(
+            msg["id"],
+            "store_error",
+            "Unable to import Home Assistant version.",
         )
         return
 

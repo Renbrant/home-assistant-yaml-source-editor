@@ -41,6 +41,10 @@ sha256_text = hashing_module.sha256_text
 DeploymentBaselineValidationError = (
     baseline_module.DeploymentBaselineValidationError
 )
+SourceDocumentChangedError = baseline_module.SourceDocumentChangedError
+apply_ha_import_to_document = baseline_module.apply_ha_import_to_document
+build_ha_import_baseline = baseline_module.build_ha_import_baseline
+normalize_deployment_baseline = baseline_module.normalize_deployment_baseline
 validate_deployed_canonical_json = baseline_module.validate_deployed_canonical_json
 
 
@@ -91,6 +95,97 @@ class DeploymentBaselineValidationTest(unittest.TestCase):
             validate_deployed_canonical_json(snapshot, digest, digest),
             snapshot,
         )
+
+    def test_legacy_baseline_defaults_without_mutating_input(self) -> None:
+        baseline = {"deployed_at": "then"}
+
+        normalized = normalize_deployment_baseline(baseline)
+
+        self.assertEqual(normalized["origin"], "deployment")
+        self.assertEqual(normalized["established_at"], "then")
+        self.assertNotIn("origin", baseline)
+
+    def test_import_stale_expected_updated_at_rejected(self) -> None:
+        document = self._document()
+
+        with self.assertRaises(SourceDocumentChangedError):
+            apply_ha_import_to_document(
+                document,
+                expected_source_updated_at="stale",
+                source_text="views: []\n",
+                source_semantic_hash="0" * 64,
+                ha_semantic_hash="0" * 64,
+                ha_canonical_json='{"views":[]}',
+                home_assistant_version="2026.8.1",
+                timestamp="now",
+            )
+
+    def test_import_oversized_source_rejected(self) -> None:
+        document = self._document()
+        source_text = "a" * (2 * 1024 * 1024 + 1)
+
+        with self.assertRaises(DeploymentBaselineValidationError):
+            apply_ha_import_to_document(
+                document,
+                expected_source_updated_at="before",
+                source_text=source_text,
+                source_semantic_hash="0" * 64,
+                ha_semantic_hash="0" * 64,
+                ha_canonical_json='{"views":[]}',
+                home_assistant_version="2026.8.1",
+                timestamp="now",
+            )
+
+    def test_import_hash_mismatch_rejected(self) -> None:
+        document = self._document()
+        snapshot = '{"views":[]}'
+        digest = sha256_text(snapshot)
+
+        with self.assertRaises(DeploymentBaselineValidationError):
+            apply_ha_import_to_document(
+                document,
+                expected_source_updated_at="before",
+                source_text="views: []\n",
+                source_semantic_hash=digest,
+                ha_semantic_hash="0" * 64,
+                ha_canonical_json=snapshot,
+                home_assistant_version="2026.8.1",
+                timestamp="now",
+            )
+
+    def test_successful_import_replaces_source_and_sets_ha_import_baseline(self) -> None:
+        document = self._document()
+        source_text = "views: []\n"
+        snapshot = '{"views":[]}'
+        digest = sha256_text(snapshot)
+
+        result = apply_ha_import_to_document(
+            document,
+            expected_source_updated_at="before",
+            source_text=source_text,
+            source_semantic_hash=digest,
+            ha_semantic_hash=digest,
+            ha_canonical_json=snapshot,
+            home_assistant_version="2026.8.1",
+            timestamp="now",
+        )
+
+        baseline = result["deployment_baseline"]
+        self.assertEqual(result["source_text"], source_text)
+        self.assertEqual(result["updated_at"], "now")
+        self.assertEqual(baseline["origin"], "ha_import")
+        self.assertEqual(baseline["deployed_at"], None)
+        self.assertEqual(baseline["established_at"], "now")
+        self.assertEqual(baseline["source_text_hash"], sha256_text(source_text))
+        self.assertEqual(baseline["deployed_canonical_json"], snapshot)
+
+    def _document(self) -> dict:
+        return {
+            "document_id": "doc",
+            "source_text": "old",
+            "deployment_baseline": None,
+            "updated_at": "before",
+        }
 
 
 if __name__ == "__main__":
