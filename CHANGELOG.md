@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-08-13
 
 Initial v0.1 release preparation for HA YAML Source Editor.
 
