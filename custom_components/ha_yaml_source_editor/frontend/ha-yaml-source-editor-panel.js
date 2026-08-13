@@ -14,6 +14,7 @@ import {
 import {
   analyzeThreeWay,
   diffSemantic,
+  formatDiffKindForLabels,
   serializeDiffValue,
 } from "./semantic-diff.mjs";
 import {
@@ -21,6 +22,7 @@ import {
   haConfigToSourceYaml,
   utf8Length,
 } from "./ha-import.mjs";
+import { createSourceCodeEditor } from "./source-code-editor.mjs";
 import {
   assessFinalOverwriteRead,
   assessOverwritePreflight,
@@ -65,6 +67,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._sourceRequestId = 0;
+    this._sourceEditor = null;
+    this._sourceEditorDocumentId = null;
+    this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
     this._validationStatus = "Not validated";
     this._validationResult = null;
     this._validationError = null;
@@ -103,6 +108,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._render();
     this._loadStatus();
     this._loadDashboards();
+  }
+
+  disconnectedCallback() {
+    this._destroySourceEditor();
   }
 
   _canUseConnection() {
@@ -192,6 +201,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceDocument = null;
     this._sourceStatus = "No dashboard selected";
     this._sourceText = "";
+    this._destroySourceEditor();
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._sourceRequestId += 1;
@@ -306,6 +316,216 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._compareRequestId += 1;
   }
 
+  _destroySourceEditor() {
+    if (!this._sourceEditor) {
+      return;
+    }
+
+    this._sourceEditor.destroy();
+    this._sourceEditor = null;
+    this._sourceEditorDocumentId = null;
+    this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
+  }
+
+  _replaceSourceEditorText(
+    sourceText,
+    documentId = this._sourceDocument?.document_id ?? null,
+    { resetHistory = false } = {}
+  ) {
+    this._sourceEditorDocumentId = documentId;
+    if (this._sourceEditor) {
+      this._sourceEditor.replaceText(sourceText, { resetHistory });
+    }
+    this._sourceEditorStatus = this._sourceEditor?.status?.() ?? this._sourceEditorStatus;
+  }
+
+  _attachSourceEditor() {
+    const host = this.shadowRoot.getElementById("source-code-editor-host");
+
+    if (!host || !this._sourceDocument) {
+      this._destroySourceEditor();
+      return;
+    }
+
+    const documentId = this._sourceDocument.document_id;
+    if (!this._sourceEditor) {
+      this._sourceEditor = createSourceCodeEditor({
+        parent: host,
+        doc: this._sourceText,
+        onChange: (text) => this._handleSourceEditorChange(text),
+        onStatusChange: (status) => this._handleSourceEditorStatus(status),
+      });
+      this._sourceEditorDocumentId = documentId;
+      return;
+    }
+
+    this._sourceEditor.attach(host);
+
+    if (this._sourceEditorDocumentId !== documentId) {
+      this._replaceSourceEditorText(this._sourceText, documentId, {
+        resetHistory: true,
+      });
+    }
+  }
+
+  _handleSourceEditorChange(text) {
+    this._sourceText = text;
+    this._clearValidation();
+    this._clearComparison(
+      this._hasUnsavedSourceChanges()
+        ? "Comparison uses saved Source; current editor has unsaved changes."
+        : null
+    );
+    this._scheduleSyncRefresh();
+    this._refreshSourceEditorUi();
+  }
+
+  _handleSourceEditorStatus(status) {
+    this._sourceEditorStatus = status;
+    this._refreshSourceEditorStatusBar();
+  }
+
+  _refreshSourceEditorUi() {
+    const statusValue = this.shadowRoot.getElementById("source-status-value");
+    const validationStatus = this.shadowRoot.getElementById(
+      "validation-status-value"
+    );
+    const validationBody = this.shadowRoot.getElementById("validation-body");
+    const compareStatus = this.shadowRoot.getElementById("compare-status-value");
+    const compareBody = this.shadowRoot.getElementById("compare-body");
+    const saveButton = this.shadowRoot.getElementById("save-source-document");
+    const validateButton = this.shadowRoot.getElementById("validate-source-document");
+    const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
+    const compareButton = this.shadowRoot.getElementById("compare-source-ha");
+    const importButton = this.shadowRoot.getElementById("import-ha-version");
+    const overwriteButton = this.shadowRoot.getElementById("overwrite-ha-source");
+
+    if (statusValue) {
+      statusValue.textContent = this._hasUnsavedSourceChanges()
+        ? "Unsaved changes"
+        : this._sourceStatus;
+    }
+
+    if (validationStatus) {
+      validationStatus.textContent = this._validationStatus;
+      validationStatus.className = "";
+    }
+
+    if (validationBody) {
+      validationBody.innerHTML = this._renderValidationBody();
+    }
+
+    if (compareStatus) {
+      compareStatus.textContent = this._compareStatus;
+      compareStatus.className = "";
+    }
+
+    if (compareBody) {
+      compareBody.innerHTML = this._renderCompareBody();
+    }
+
+    if (saveButton) {
+      saveButton.disabled = !this._hasUnsavedSourceChanges();
+    }
+
+    if (validateButton) {
+      validateButton.disabled = this._validationStatus === "Validating";
+    }
+
+    if (deployButton) {
+      deployButton.disabled =
+        this._hasUnsavedSourceChanges() ||
+        this._sourceText.length === 0 ||
+        this._isDeploymentInProgress() ||
+        this._isResolutionInProgress();
+    }
+
+    if (compareButton) {
+      compareButton.disabled =
+        this._hasUnsavedSourceChanges() ||
+        this._compareStatus === "Loading" ||
+        this._isDeploymentInProgress() ||
+        this._isResolutionInProgress();
+    }
+
+    if (importButton) {
+      importButton.disabled = !this._canResolveFromCompare();
+    }
+
+    if (overwriteButton) {
+      overwriteButton.disabled =
+        !this._canResolveFromCompare() ||
+        !["HA MODIFIED", "BOTH MODIFIED"].includes(this._syncStatus);
+    }
+
+    this._refreshSourceEditorStatusBar();
+  }
+
+  _refreshSourceEditorStatusBar() {
+    const statusBar = this.shadowRoot.getElementById("source-editor-status");
+    if (!statusBar) {
+      return;
+    }
+
+    const modified = this._hasUnsavedSourceChanges() ? "Modified" : "Saved";
+    statusBar.textContent = `Ln ${this._sourceEditorStatus.line}, Col ${this._sourceEditorStatus.column}    ${this._sourceEditorStatus.lineCount} ${this._sourceEditorStatus.lineCount === 1 ? "line" : "lines"}    YAML    LF    ${modified}`;
+  }
+
+  _refreshSyncUi() {
+    const statusValue = this.shadowRoot.getElementById("sync-status-value");
+    const sourceVsHaValue = this.shadowRoot.getElementById("source-vs-ha-value");
+    const sourceTextHash = this.shadowRoot.getElementById("source-text-hash");
+    const sourceSemanticHash = this.shadowRoot.getElementById(
+      "source-semantic-hash"
+    );
+    const haSemanticHash = this.shadowRoot.getElementById("ha-semantic-hash");
+    const syncMessage = this.shadowRoot.getElementById("sync-message");
+    const refreshButton = this.shadowRoot.getElementById("refresh-sync-status");
+
+    if (statusValue) {
+      statusValue.textContent = this._syncStatus;
+      statusValue.className = this._syncStatus === "SYNC ERROR" ? "error" : "";
+    }
+
+    if (sourceVsHaValue) {
+      sourceVsHaValue.textContent = this._sourceVsHa;
+    }
+
+    if (sourceTextHash) {
+      sourceTextHash.title = this._sourceTextHash ?? "";
+      sourceTextHash.textContent = shortHash(this._sourceTextHash);
+    }
+
+    if (sourceSemanticHash) {
+      sourceSemanticHash.title = this._sourceSemanticHash ?? "";
+      sourceSemanticHash.textContent = shortHash(this._sourceSemanticHash);
+    }
+
+    if (haSemanticHash) {
+      haSemanticHash.title = this._haSemanticHash ?? "";
+      haSemanticHash.textContent = shortHash(this._haSemanticHash);
+    }
+
+    if (syncMessage) {
+      syncMessage.innerHTML = this._renderSyncMessage();
+    }
+
+    if (refreshButton) {
+      refreshButton.disabled =
+        !this._sourceDocument ||
+        !this._selectedDashboard ||
+        this._syncStatus === "Calculating" ||
+        this._isResolutionInProgress();
+    }
+  }
+
+  _refreshDashboardConfigJson() {
+    const configBlock = this.shadowRoot.getElementById("dashboard-config-json");
+    if (configBlock && this._configStatus === "Loaded") {
+      configBlock.textContent = JSON.stringify(this._config, null, 2);
+    }
+  }
+
   _selectDashboard(dashboard) {
     if (this._isDeploymentInProgress()) {
       this._deploymentMessage = "Deployment is in progress.";
@@ -334,6 +554,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceDocument = null;
     this._sourceStatus = "Checking";
     this._sourceText = "";
+    this._destroySourceEditor();
     this._lastSavedSourceText = "";
     this._sourceError = null;
     this._clearValidation();
@@ -418,6 +639,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = getResult.document;
       this._sourceText = getResult.document.source_text;
       this._lastSavedSourceText = getResult.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id,
+        { resetHistory: true }
+      );
       this._sourceStatus = "Loaded";
       this._sourceError = null;
       this._clearValidation();
@@ -462,6 +688,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = document;
       this._sourceText = document.source_text ?? "";
       this._lastSavedSourceText = document.source_text ?? "";
+      this._replaceSourceEditorText(this._sourceText, document.document_id, {
+        resetHistory: true,
+      });
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
       this._clearValidation();
@@ -504,6 +733,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = result.document;
       this._sourceText = result.document.source_text;
       this._lastSavedSourceText = result.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id
+      );
       this._sourceStatus = "Saved";
       this._sourceError = null;
       this._clearComparison();
@@ -738,6 +971,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = refreshedDocument;
       this._sourceText = refreshedDocument.source_text;
       this._lastSavedSourceText = refreshedDocument.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id
+      );
       this._config = verifiedHaConfig;
       this._configStatus = "Loaded";
       this._deploymentStatus = DEPLOYMENT_OPERATION.SUCCESS;
@@ -1077,6 +1314,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = result.document;
       this._sourceText = result.document.source_text;
       this._lastSavedSourceText = result.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id,
+        { resetHistory: true }
+      );
       this._sourceStatus = "Saved";
       this._config = finalHaConfig;
       this._configStatus = "Loaded";
@@ -1254,6 +1496,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = recordResult.document;
       this._sourceText = recordResult.document.source_text;
       this._lastSavedSourceText = recordResult.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id
+      );
       this._sourceStatus = "Saved";
       this._config = verifiedHaConfig;
       this._configStatus = "Loaded";
@@ -1418,7 +1664,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   async _refreshSyncStatus({ reloadHa = false } = {}) {
     if (!this._sourceDocument || !this._selectedDashboard) {
       this._clearSyncState();
-      this._render();
+      this._refreshSyncUi();
+      this._refreshSourceEditorUi();
       return;
     }
 
@@ -1426,7 +1673,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._syncRequestId = requestId;
     this._syncStatus = "Calculating";
     this._syncError = null;
-    this._render();
+    this._refreshSyncUi();
+    this._refreshSourceEditorUi();
 
     try {
       let currentHaConfig = this._configStatus === "Loaded" ? this._config : null;
@@ -1437,6 +1685,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
         this._config = currentHaConfig;
         this._configStatus = "Loaded";
+        this._refreshDashboardConfigJson();
       }
 
       const sourceAnalysis = analyzeSourceText(this._sourceText);
@@ -1494,7 +1743,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._syncError = err?.message || "Unable to calculate synchronization status.";
     }
 
-    this._render();
+    this._refreshSyncUi();
+    this._refreshSourceEditorUi();
   }
 
   async _hashText(text) {
@@ -1710,14 +1960,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     return `
       <div class="source-editor">
-        <label for="source-yaml">Source YAML</label>
+        <label for="source-code-editor-host">Source YAML</label>
         <p class="state">
           This Source YAML is stored as the editor text, using LF newlines in
           v0.1. Saving it does not modify Home Assistant's Lovelace
           configuration. Validate checks the current editor text and does not
           save or deploy it.
         </p>
-        <textarea id="source-yaml" spellcheck="false"></textarea>
+        <div class="source-code-editor-shell">
+          <div id="source-code-editor-host"></div>
+          <div id="source-editor-status" class="source-editor-status"></div>
+        </div>
         <div class="source-actions">
           <button type="button" id="save-source-document" ${saveDisabled}>
             Save Source
@@ -1837,23 +2090,23 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         </p>
         <dl class="sync-status">
           <dt>Sync status</dt>
-          <dd class="${statusClass.trim()}">${this._escapeHtml(this._syncStatus)}</dd>
+          <dd id="sync-status-value" class="${statusClass.trim()}">${this._escapeHtml(this._syncStatus)}</dd>
           <dt>Source vs HA</dt>
-          <dd>${this._escapeHtml(this._sourceVsHa)}</dd>
+          <dd id="source-vs-ha-value">${this._escapeHtml(this._sourceVsHa)}</dd>
           <dt>Source text</dt>
-          <dd title="${this._escapeHtml(this._sourceTextHash ?? "")}">${this._escapeHtml(
+          <dd id="source-text-hash" title="${this._escapeHtml(this._sourceTextHash ?? "")}">${this._escapeHtml(
             shortHash(this._sourceTextHash)
           )}</dd>
           <dt>Source semantics</dt>
-          <dd title="${this._escapeHtml(this._sourceSemanticHash ?? "")}">${this._escapeHtml(
+          <dd id="source-semantic-hash" title="${this._escapeHtml(this._sourceSemanticHash ?? "")}">${this._escapeHtml(
             shortHash(this._sourceSemanticHash)
           )}</dd>
           <dt>Current HA</dt>
-          <dd title="${this._escapeHtml(this._haSemanticHash ?? "")}">${this._escapeHtml(
+          <dd id="ha-semantic-hash" title="${this._escapeHtml(this._haSemanticHash ?? "")}">${this._escapeHtml(
             shortHash(this._haSemanticHash)
           )}</dd>
         </dl>
-        ${this._renderSyncMessage()}
+        <div id="sync-message">${this._renderSyncMessage()}</div>
       </section>
     `;
   }
@@ -2152,7 +2405,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     return `
       <li class="diff-entry">
-        <div class="diff-kind">${this._escapeHtml(this._formatDiffKind(entry.kind))}</div>
+        <div class="diff-kind">${this._escapeHtml(
+          this._formatDiffKind(entry.kind, sourceLabel, haLabel)
+        )}</div>
         <div class="diff-path">${this._escapeHtml(entry.path)}</div>
         ${sourceValue}
         ${haValue}
@@ -2171,14 +2426,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
-  _formatDiffKind(kind) {
-    if (kind === "source_only") {
-      return "SOURCE ONLY";
-    }
-    if (kind === "ha_only") {
-      return "HA ONLY";
-    }
-    return "CHANGED";
+  _formatDiffKind(kind, sourceLabel, haLabel) {
+    return formatDiffKindForLabels(kind, { sourceLabel, haLabel });
   }
 
   _renderUnsupportedList(dashboards) {
@@ -2518,24 +2767,28 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           font-weight: 500;
         }
 
-        textarea {
+        .source-code-editor-shell {
           width: 100%;
-          min-height: 320px;
           box-sizing: border-box;
-          resize: vertical;
-          padding: 16px;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
-          color: var(--primary-text-color);
-          background: var(--card-background-color);
-          font-family: var(--code-font-family, monospace);
-          font-size: 13px;
-          line-height: 1.5;
+          overflow: hidden;
+          background: var(--code-editor-background-color, var(--card-background-color));
+          box-shadow: var(--ha-card-box-shadow, none);
         }
 
-        textarea:focus {
-          outline: 2px solid var(--primary-color);
-          outline-offset: 2px;
+        #source-code-editor-host {
+          min-height: 360px;
+        }
+
+        .source-editor-status {
+          padding: 8px 12px;
+          border-top: 1px solid var(--divider-color);
+          color: var(--secondary-text-color);
+          background: var(--secondary-background-color);
+          font-family: var(--code-font-family, monospace);
+          font-size: 12px;
+          white-space: pre-wrap;
         }
 
         pre {
@@ -2660,86 +2913,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .getElementById("overwrite-ha-source")
       ?.addEventListener("click", () => this._overwriteHaWithSavedSource());
 
-    const sourceTextarea = this.shadowRoot.getElementById("source-yaml");
-    if (sourceTextarea) {
-      sourceTextarea.value = this._sourceText;
-      sourceTextarea.addEventListener("input", (event) => {
-        this._sourceText = event.target.value;
-        this._clearValidation();
-        this._clearComparison(
-          this._hasUnsavedSourceChanges()
-            ? "Comparison uses saved Source; current editor has unsaved changes."
-            : null
-        );
-        this._scheduleSyncRefresh();
-        const statusValue = this.shadowRoot.getElementById("source-status-value");
-        const validationStatus = this.shadowRoot.getElementById(
-          "validation-status-value"
-        );
-        const validationBody = this.shadowRoot.getElementById("validation-body");
-        const compareStatus = this.shadowRoot.getElementById("compare-status-value");
-        const compareBody = this.shadowRoot.getElementById("compare-body");
-        const saveButton = this.shadowRoot.getElementById("save-source-document");
-        const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
-        const compareButton = this.shadowRoot.getElementById("compare-source-ha");
-        const importButton = this.shadowRoot.getElementById("import-ha-version");
-        const overwriteButton = this.shadowRoot.getElementById("overwrite-ha-source");
-
-        if (statusValue) {
-          statusValue.textContent = this._hasUnsavedSourceChanges()
-            ? "Unsaved changes"
-            : this._sourceStatus;
-        }
-
-        if (validationStatus) {
-          validationStatus.textContent = this._validationStatus;
-          validationStatus.className = "";
-        }
-
-        if (validationBody) {
-          validationBody.innerHTML = this._renderValidationBody();
-        }
-
-        if (compareStatus) {
-          compareStatus.textContent = this._compareStatus;
-          compareStatus.className = "";
-        }
-
-        if (compareBody) {
-          compareBody.innerHTML = this._renderCompareBody();
-        }
-
-        if (saveButton) {
-          saveButton.disabled = !this._hasUnsavedSourceChanges();
-        }
-
-        if (deployButton) {
-          deployButton.disabled =
-            this._hasUnsavedSourceChanges() ||
-            this._sourceText.length === 0 ||
-            this._isDeploymentInProgress() ||
-            this._isResolutionInProgress();
-        }
-
-        if (compareButton) {
-          compareButton.disabled =
-            this._hasUnsavedSourceChanges() ||
-            this._compareStatus === "Loading" ||
-            this._isDeploymentInProgress() ||
-            this._isResolutionInProgress();
-        }
-
-        if (importButton) {
-          importButton.disabled = !this._canResolveFromCompare();
-        }
-
-        if (overwriteButton) {
-          overwriteButton.disabled =
-            !this._canResolveFromCompare() ||
-            !["HA MODIFIED", "BOTH MODIFIED"].includes(this._syncStatus);
-        }
-      });
-    }
+    this._attachSourceEditor();
+    this._refreshSourceEditorStatusBar();
 
     const configBlock = this.shadowRoot.getElementById("dashboard-config-json");
     if (configBlock && this._configStatus === "Loaded") {
@@ -2761,4 +2936,17 @@ class ResolutionBlockedError extends Error {}
 
 class StaleComparisonError extends ResolutionBlockedError {}
 
-customElements.define("ha-yaml-source-editor-panel", HaYamlSourceEditorPanel);
+export function panelWebComponentNameFromModuleUrl(moduleUrl) {
+  const assetIdentity = new URL(moduleUrl).searchParams.get("v");
+  if (!assetIdentity) {
+    throw new Error("Missing HA YAML Source Editor frontend asset identity.");
+  }
+
+  const suffix = assetIdentity.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return `ha-yaml-source-editor-panel-${suffix}`;
+}
+
+customElements.define(
+  panelWebComponentNameFromModuleUrl(import.meta.url),
+  HaYamlSourceEditorPanel
+);

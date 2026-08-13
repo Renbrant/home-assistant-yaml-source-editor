@@ -42,6 +42,25 @@ export function serializeDiffValue(value, { limit = DEFAULT_VALUE_LIMIT } = {}) 
   };
 }
 
+export function formatDiffKindForLabels(kind, { sourceLabel, haLabel } = {}) {
+  if (kind === "changed") {
+    return "CHANGED";
+  }
+
+  const directSourceToHa =
+    sourceLabel === "Saved Source" && haLabel === "Current HA";
+
+  if (kind === "source_only") {
+    return directSourceToHa ? "SOURCE ONLY" : "REMOVED";
+  }
+
+  if (kind === "ha_only") {
+    return directSourceToHa ? "HA ONLY" : "ADDED";
+  }
+
+  return "CHANGED";
+}
+
 function compareValues(sourceValue, haValue, path, entries, state) {
   if (Object.is(sourceValue, haValue)) {
     return;

@@ -36,6 +36,28 @@ test("frontend module imports resolve inside shipped integration directory", asy
   }
 });
 
+test("frontend asset identity derives matching Python and JS component names", async () => {
+  const constants = await readFile(join(integrationDir, "const.py"), "utf8");
+  const panel = await readFile(entrypoint, "utf8");
+  const assetIdentity = constants.match(/^PANEL_ASSET_IDENTITY = f"\{VERSION\}-r\{PANEL_FRONTEND_REVISION\}"$/m);
+  const webComponent = constants.match(/^    f"([^"]+)"$/m);
+
+  assert.notEqual(assetIdentity, null);
+  assert.equal(webComponent?.[1], "ha-yaml-source-editor-panel-{PANEL_ASSET_IDENTITY.replace('.', '-')}");
+  assert.match(panel, /searchParams\.get\("v"\)/);
+  assert.match(panel, /Missing HA YAML Source Editor frontend asset identity/);
+  assert.match(panel, /replace\(\/\[\^a-z0-9\]\+\/g, "-"\)/);
+  assert.equal(
+    panelWebComponentNameFromAssetIdentity("0.1.0-r1"),
+    "ha-yaml-source-editor-panel-0-1-0-r1",
+  );
+});
+
+function panelWebComponentNameFromAssetIdentity(assetIdentity) {
+  const suffix = assetIdentity.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  return `ha-yaml-source-editor-panel-${suffix}`;
+}
+
 function relativeImportSpecifiers(source) {
   const specifiers = [];
   const importPattern = /import\s+(?:[^'"]+\s+from\s+)?["'](\.[^"']+)["']/g;
