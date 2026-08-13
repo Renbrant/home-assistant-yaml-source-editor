@@ -1,5 +1,7 @@
 # HA YAML Source Editor
 
+![HA YAML Source Editor banner](Photos/Banner.png)
+
 Keep your YAML. Keep the Home Assistant UI.
 
 HA YAML Source Editor is a Home Assistant custom integration for people who
