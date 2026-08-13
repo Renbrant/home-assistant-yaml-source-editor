@@ -2,7 +2,7 @@
 
 DOMAIN = "ha_yaml_source_editor"
 NAME = "HA YAML Source Editor"
-VERSION = "0.0.1"
+VERSION = "0.1.0"
 
 PANEL_URL_PATH = "ha-yaml-source-editor"
 PANEL_WEB_COMPONENT = "ha-yaml-source-editor-panel"

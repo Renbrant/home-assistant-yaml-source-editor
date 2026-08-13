@@ -1,0 +1,49 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Project checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install JavaScript dependencies
+        run: npm ci
+
+      - name: JavaScript syntax
+        run: npm run check:js
+
+      - name: JavaScript tests
+        run: npm test
+
+      - name: Verify vendored js-yaml
+        run: |
+          npm run vendor:js-yaml
+          git diff --exit-code -- custom_components/ha_yaml_source_editor/frontend/vendor/
+
+      - name: Python syntax
+        run: python -m compileall custom_components
+
+      - name: Python tests
+        run: python -m unittest discover -s test -p "*_test.py"
+
+      - name: JSON validation
+        run: |
+          node -e "const fs=require('fs'); for (const f of ['package.json','package-lock.json','hacs.json','custom_components/ha_yaml_source_editor/manifest.json','custom_components/ha_yaml_source_editor/translations/en.json']) JSON.parse(fs.readFileSync(f,'utf8'));"
