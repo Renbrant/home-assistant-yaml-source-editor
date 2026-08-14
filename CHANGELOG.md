@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.1] - 2026-08-14
+
+Critical editor viewport bugfix release.
+
+### Fixed
+
+- Fixed #21: the Source editor no longer jumps back to the top during routine Home Assistant panel updates.
+- Preserve CodeMirror vertical and horizontal viewport across routine panel rerenders.
+- Restore viewport state only when the same EditorView and Source Document remain active.
+- Existing Source YAML, Save, Validate, Compare, deployment, conflict detection, and baseline behavior remain unchanged.
+
 ## [0.2.0] - 2026-08-13
 
 Workspace UX and Source bootstrap release.
