@@ -24,6 +24,7 @@ import {
 } from "./ha-import.mjs";
 import {
   createSourceCodeEditor,
+  shouldRestoreEditorFocusSnapshot,
   shouldRestoreEditorViewportSnapshot,
 } from "./source-code-editor.mjs";
 import {
@@ -106,17 +107,20 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._inspectorUserToggled = false;
     this._inspectorResizeObserver = null;
     this._inspectorResizeTarget = null;
+    this._hasRendered = false;
   }
 
   set hass(hass) {
     this._hass = hass;
-    this._render();
+    this._refreshRoutineUi();
     this._loadStatus();
     this._loadDashboards();
   }
 
   connectedCallback() {
-    this._render();
+    if (!this._hasRendered) {
+      this._render();
+    }
     this._loadStatus();
     this._loadDashboards();
   }
@@ -124,6 +128,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   disconnectedCallback() {
     this._destroySourceEditor();
     this._disconnectInspectorResizeObserver();
+    this._hasRendered = false;
   }
 
   _disconnectInspectorResizeObserver() {
@@ -208,7 +213,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._error = true;
     }
 
-    this._render();
+    this._refreshRoutineUi();
   }
 
   async _loadDashboards({ force = false } = {}) {
@@ -224,7 +229,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._dashboardLoading = true;
     this._dashboardStatus = "Connecting";
     this._dashboardError = null;
-    this._render();
+    this._refreshRoutineUi();
 
     try {
       const dashboards = await this._hass.connection.sendMessagePromise({
@@ -239,7 +244,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._dashboardError = "Unable to complete dashboard discovery.";
     } finally {
       this._dashboardLoading = false;
-      this._render();
+      this._refreshRoutineUi();
     }
   }
 
@@ -261,6 +266,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     this._clearSelectedDashboard();
+    this._render();
     this._loadDashboards({ force: true });
   }
 
@@ -664,6 +670,139 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     if (configBlock && this._configStatus === "Loaded") {
       configBlock.textContent = JSON.stringify(this._config, null, 2);
     }
+  }
+
+  _refreshRoutineUi() {
+    if (!this._hasRendered) {
+      if (this.isConnected) {
+        this._render();
+      }
+      return;
+    }
+
+    this._refreshApplicationHeader();
+    this._refreshExplorerUi();
+    this._refreshEditorContextUi();
+    this._refreshSourceEditorUi();
+    this._refreshSyncUi();
+    this._refreshDeploymentUi();
+    this._refreshInspectorUi();
+    this._wireEventHandlers(
+      this._dashboards.filter((dashboard) => dashboard.mode === "storage")
+    );
+  }
+
+  _refreshApplicationHeader() {
+    const version = this.shadowRoot.querySelector(".app-version");
+    if (version) {
+      version.textContent = `v${this._status?.integration_version ?? "Unknown"}`;
+    }
+  }
+
+  _refreshExplorerUi() {
+    const alerts = this.shadowRoot.getElementById("explorer-alerts");
+    if (alerts) {
+      alerts.innerHTML = this._renderExplorerAlerts();
+    }
+
+    const storageDashboards = this._dashboards.filter(
+      (dashboard) => dashboard.mode === "storage"
+    );
+    const unsupportedDashboards = this._dashboards.filter(
+      (dashboard) => dashboard.mode !== "storage"
+    );
+    const dashboardList = this.shadowRoot.getElementById("dashboard-list-body");
+    if (dashboardList) {
+      dashboardList.innerHTML = this._renderDashboardList(storageDashboards);
+    }
+
+    const unsupportedList = this.shadowRoot.getElementById(
+      "unsupported-dashboard-list"
+    );
+    if (unsupportedList) {
+      unsupportedList.innerHTML = this._renderUnsupportedList(
+        unsupportedDashboards
+      );
+    }
+
+    const refreshButton = this.shadowRoot.getElementById("refresh-dashboards");
+    if (refreshButton) {
+      refreshButton.disabled =
+        this._dashboardLoading ||
+        !this._canUseConnection() ||
+        this._isDeploymentInProgress() ||
+        this._isResolutionInProgress();
+    }
+
+    this._wireDashboardCardHandlers(storageDashboards);
+  }
+
+  _refreshEditorContextUi() {
+    const target = this.shadowRoot.querySelector(".editor-target");
+    if (!target) {
+      return;
+    }
+
+    const dashboard = this._selectedDashboard;
+    const dashboardTitle = dashboard
+      ? this._dashboardTitle(dashboard)
+      : "No dashboard selected";
+    const dashboardPath = dashboard ? this._dashboardPath(dashboard) : "";
+    target.innerHTML = `
+      <span>${this._escapeHtml(dashboardTitle)}</span>
+      ${
+        dashboardPath
+          ? `<span class="editor-target-path">${this._escapeHtml(dashboardPath)}</span>`
+          : ""
+      }
+    `;
+  }
+
+  _refreshDeploymentUi() {
+    const deploymentStatus = this.shadowRoot.getElementById(
+      "deployment-status-value"
+    );
+    const deploymentBody = this.shadowRoot.getElementById("deployment-body");
+
+    if (deploymentStatus) {
+      deploymentStatus.textContent = this._deploymentStatus;
+      deploymentStatus.className =
+        this._deploymentStatus === DEPLOYMENT_OPERATION.ERROR ||
+        this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
+          ? "error"
+          : "";
+    }
+
+    const deploymentList = deploymentStatus?.closest("dl");
+    if (deploymentList) {
+      deploymentList.innerHTML = `
+        <dt>Status</dt>
+        <dd id="deployment-status-value" class="${
+          this._deploymentStatus === DEPLOYMENT_OPERATION.ERROR ||
+          this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
+            ? "error"
+            : ""
+        }">${this._escapeHtml(this._deploymentStatus)}</dd>
+        ${this._renderDeploymentBaseline()}
+      `;
+    }
+
+    if (deploymentBody) {
+      deploymentBody.innerHTML = `
+        ${this._renderDeploymentMessage()}
+        ${this._renderDeploymentImportNote()}
+      `;
+    }
+  }
+
+  _refreshInspectorUi() {
+    const inspectorPanel = this.shadowRoot.querySelector(".inspector-panel");
+    if (!inspectorPanel) {
+      return;
+    }
+
+    inspectorPanel.innerHTML = this._renderInspectorPanel();
+    this._refreshDashboardConfigJson();
   }
 
   _selectDashboard(dashboard) {
@@ -2377,6 +2516,26 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
         ? " error"
         : "";
+
+    return `
+      <section class="section">
+        <h2>Deployment</h2>
+        <dl class="deployment-status">
+          <dt>Status</dt>
+          <dd id="deployment-status-value" class="${statusClass.trim()}">${this._escapeHtml(
+            this._deploymentStatus
+          )}</dd>
+          ${this._renderDeploymentBaseline()}
+        </dl>
+        <div id="deployment-body">
+          ${this._renderDeploymentMessage()}
+          ${this._renderDeploymentImportNote()}
+        </div>
+      </section>
+    `;
+  }
+
+  _renderDeploymentBaseline() {
     const baseline = this._sourceDocument?.deployment_baseline ?? null;
     const baselineOrigin = baseline?.origin ?? null;
     const lastDeployed =
@@ -2385,37 +2544,31 @@ class HaYamlSourceEditorPanel extends HTMLElement {
             baseline?.deployed_at ?? "-"
           )}</dd>`
         : "";
-    const importNote =
-      baselineOrigin === "ha_import"
-        ? `<p class="state">This Source was imported from Home Assistant's normalized configuration. Original comments/formatting removed by Home Assistant cannot be recovered.</p>`
-        : "";
 
     return `
-      <section class="section">
-        <h2>Deployment</h2>
-        <dl class="deployment-status">
-          <dt>Status</dt>
-          <dd class="${statusClass.trim()}">${this._escapeHtml(
-            this._deploymentStatus
-          )}</dd>
-          <dt>Baseline origin</dt>
-          <dd>${this._escapeHtml(this._formatBaselineOrigin(baselineOrigin))}</dd>
-          <dt>Baseline established</dt>
-          <dd>${this._escapeHtml(baseline?.established_at ?? "-")}</dd>
-          ${lastDeployed}
-          <dt>HA baseline</dt>
-          <dd title="${this._escapeHtml(
-            baseline?.ha_semantic_hash ?? ""
-          )}">${this._escapeHtml(shortHash(baseline?.ha_semantic_hash))}</dd>
-          <dt>HA version</dt>
-          <dd>${this._escapeHtml(
-            baseline?.home_assistant_version ?? "-"
-          )}</dd>
-        </dl>
-        ${this._renderDeploymentMessage()}
-        ${importNote}
-      </section>
+      <dt>Baseline origin</dt>
+      <dd>${this._escapeHtml(this._formatBaselineOrigin(baselineOrigin))}</dd>
+      <dt>Baseline established</dt>
+      <dd>${this._escapeHtml(baseline?.established_at ?? "-")}</dd>
+      ${lastDeployed}
+      <dt>HA baseline</dt>
+      <dd title="${this._escapeHtml(
+        baseline?.ha_semantic_hash ?? ""
+      )}">${this._escapeHtml(shortHash(baseline?.ha_semantic_hash))}</dd>
+      <dt>HA version</dt>
+      <dd>${this._escapeHtml(
+        baseline?.home_assistant_version ?? "-"
+      )}</dd>
     `;
+  }
+
+  _renderDeploymentImportNote() {
+    const baselineOrigin =
+      this._sourceDocument?.deployment_baseline?.origin ?? null;
+
+    return baselineOrigin === "ha_import"
+      ? `<p class="state">This Source was imported from Home Assistant's normalized configuration. Original comments/formatting removed by Home Assistant cannot be recovered.</p>`
+      : "";
   }
 
   _formatBaselineOrigin(origin) {
@@ -2980,12 +3133,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
             Refresh
           </button>
         </div>
-        ${this._renderExplorerAlerts()}
+        <div id="explorer-alerts">${this._renderExplorerAlerts()}</div>
         <section class="section first-section">
           <h3>Storage Mode</h3>
-          ${this._renderDashboardList(storageDashboards)}
+          <div id="dashboard-list-body">
+            ${this._renderDashboardList(storageDashboards)}
+          </div>
         </section>
-        ${this._renderUnsupportedList(unsupportedDashboards)}
+        <div id="unsupported-dashboard-list">
+          ${this._renderUnsupportedList(unsupportedDashboards)}
+        </div>
       </aside>
     `;
   }
@@ -3037,6 +3194,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ? {
             editor: this._sourceEditor,
             documentId: this._sourceEditorDocumentId,
+            hadFocus: this._sourceEditor.hasFocus(),
             effect: this._sourceEditor.captureViewportSnapshot(),
           }
         : null;
@@ -3870,68 +4028,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         </div>
       </section>
     `;
+    this._hasRendered = true;
 
-    this.shadowRoot
-      .getElementById("refresh-dashboards")
-      ?.addEventListener("click", () => this._refreshDashboards());
-
-    this.shadowRoot
-      .getElementById("toggle-inspector")
-      ?.addEventListener("click", () => this._toggleInspector());
-
-    for (const tab of this.shadowRoot.querySelectorAll(".inspector-tab")) {
-      tab.addEventListener("click", () => {
-        this._setInspectorTab(tab.dataset.inspectorTab);
-      });
-    }
-
-    for (const button of this.shadowRoot.querySelectorAll(".dashboard-card")) {
-      button.addEventListener("click", () => {
-        const dashboard = storageDashboards.find(
-          (item) => this._dashboardKey(item) === button.dataset.dashboardKey
-        );
-
-        if (dashboard) {
-          this._selectDashboard(dashboard);
-        }
-      });
-    }
-
-    this.shadowRoot
-      .getElementById("create-source-document")
-      ?.addEventListener("click", () => this._createSourceDocument());
-
-    this.shadowRoot
-      .getElementById("initialize-source-from-ha")
-      ?.addEventListener("click", () => this._initializeSourceFromHa());
-
-    this.shadowRoot
-      .getElementById("save-source-document")
-      ?.addEventListener("click", () => this._saveSourceDocument());
-
-    this.shadowRoot
-      .getElementById("validate-source-document")
-      ?.addEventListener("click", () => this._validateSourceDocument());
-
-    this.shadowRoot
-      .getElementById("deploy-saved-source")
-      ?.addEventListener("click", () => this._deploySavedSource());
-
-    this.shadowRoot
-      .getElementById("refresh-sync-status")
-      ?.addEventListener("click", () => this._refreshSyncStatus({ reloadHa: true }));
-
-    this.shadowRoot
-      .getElementById("compare-source-ha")
-      ?.addEventListener("click", () => this._compareSourceToHa());
-
-    this.shadowRoot
-      .getElementById("import-ha-version")
-      ?.addEventListener("click", () => this._importHaVersion());
-
-    this.shadowRoot
-      .getElementById("overwrite-ha-source")
-      ?.addEventListener("click", () => this._overwriteHaWithSavedSource());
+    this._wireEventHandlers(storageDashboards);
 
     this._attachSourceEditor();
     if (
@@ -3944,6 +4043,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         editorViewportSnapshot.effect
       );
     }
+    if (
+      shouldRestoreEditorFocusSnapshot(editorViewportSnapshot, {
+        editor: this._sourceEditor,
+        documentId: this._sourceEditorDocumentId,
+      })
+    ) {
+      this._sourceEditor.focus();
+    }
     this._refreshSourceEditorStatusBar();
 
     const configBlock = this.shadowRoot.getElementById("dashboard-config-json");
@@ -3952,6 +4059,89 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     this._syncInspectorResizeObserver();
+  }
+
+  _wireEventHandlers(storageDashboards) {
+    const refreshButton = this.shadowRoot.getElementById("refresh-dashboards");
+    if (refreshButton) {
+      refreshButton.onclick = () => this._refreshDashboards();
+    }
+
+    const toggleInspector = this.shadowRoot.getElementById("toggle-inspector");
+    if (toggleInspector) {
+      toggleInspector.onclick = () => this._toggleInspector();
+    }
+
+    for (const tab of this.shadowRoot.querySelectorAll(".inspector-tab")) {
+      tab.onclick = () => {
+        this._setInspectorTab(tab.dataset.inspectorTab);
+      };
+    }
+
+    this._wireDashboardCardHandlers(storageDashboards);
+
+    const createSource = this.shadowRoot.getElementById("create-source-document");
+    if (createSource) {
+      createSource.onclick = () => this._createSourceDocument();
+    }
+
+    const initializeSource = this.shadowRoot.getElementById(
+      "initialize-source-from-ha"
+    );
+    if (initializeSource) {
+      initializeSource.onclick = () => this._initializeSourceFromHa();
+    }
+
+    const saveSource = this.shadowRoot.getElementById("save-source-document");
+    if (saveSource) {
+      saveSource.onclick = () => this._saveSourceDocument();
+    }
+
+    const validateSource = this.shadowRoot.getElementById(
+      "validate-source-document"
+    );
+    if (validateSource) {
+      validateSource.onclick = () => this._validateSourceDocument();
+    }
+
+    const deploySource = this.shadowRoot.getElementById("deploy-saved-source");
+    if (deploySource) {
+      deploySource.onclick = () => this._deploySavedSource();
+    }
+
+    const refreshSync = this.shadowRoot.getElementById("refresh-sync-status");
+    if (refreshSync) {
+      refreshSync.onclick = () => this._refreshSyncStatus({ reloadHa: true });
+    }
+
+    const compareSource = this.shadowRoot.getElementById("compare-source-ha");
+    if (compareSource) {
+      compareSource.onclick = () => this._compareSourceToHa();
+    }
+
+    const importHa = this.shadowRoot.getElementById("import-ha-version");
+    if (importHa) {
+      importHa.onclick = () => this._importHaVersion();
+    }
+
+    const overwriteHa = this.shadowRoot.getElementById("overwrite-ha-source");
+    if (overwriteHa) {
+      overwriteHa.onclick = () => this._overwriteHaWithSavedSource();
+    }
+  }
+
+  _wireDashboardCardHandlers(storageDashboards) {
+    for (const button of this.shadowRoot.querySelectorAll(".dashboard-card")) {
+      button.onclick = () => {
+        const dashboard = storageDashboards.find(
+          (item) => this._dashboardKey(item) === button.dataset.dashboardKey
+        );
+
+        if (dashboard) {
+          this._selectDashboard(dashboard);
+        }
+      };
+    }
   }
 }
 

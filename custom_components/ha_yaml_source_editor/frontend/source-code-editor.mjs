@@ -85,6 +85,16 @@ export function shouldRestoreEditorViewportSnapshot(
   );
 }
 
+export function shouldRestoreEditorFocusSnapshot(
+  snapshot,
+  { editor, documentId }
+) {
+  return Boolean(
+    snapshot?.hadFocus &&
+    shouldRestoreEditorViewportSnapshot(snapshot, { editor, documentId })
+  );
+}
+
 class SourceCodeEditor {
   constructor({ parent, doc, onChange, onStatusChange }) {
     this._onChange = onChange;

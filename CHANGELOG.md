@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.2] - 2026-08-14
+
+Source editor lifecycle stability release.
+
+### Fixed
+
+- Completes the fix for #21 after the v0.2.1 viewport-restoration mitigation.
+- Routine Home Assistant updates no longer remount the active CodeMirror editor while the same Source Document remains active.
+- Source editor viewport, focus, selection context, and keyboard handling remain stable during routine status and dashboard refreshes.
+- Ctrl+A remains scoped to the Source YAML editor when CodeMirror has focus.
+- Legitimate full renders preserve viewport and restore focus only for the same EditorView and Source Document when the editor previously had focus.
+- Disconnect/reconnect lifecycle now destroys and recreates CodeMirror cleanly without reusing a destroyed EditorView.
+- Existing Source YAML, Save, Validate, Compare, deployment, conflict detection, resolution, and baseline protections remain unchanged.
+
 ## [0.2.1] - 2026-08-14
 
 Critical editor viewport bugfix release.

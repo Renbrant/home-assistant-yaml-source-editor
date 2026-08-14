@@ -81,7 +81,8 @@ test("Initialize from HA command is an editor-scoped empty Source bootstrap acti
 
   assert.match(commandBar, /id="create-source-document"[\s\S]+id="initialize-source-from-ha"[\s\S]+id="save-source-document"/);
   assert.match(panel, /const initializeDisabled = this\._canInitializeSourceFromHa\(\)[\s\S]+\?[\s\S]+""[\s\S]+:[\s\S]+"disabled"/);
-  assert.match(panel, /\.getElementById\("initialize-source-from-ha"\)[\s\S]+this\._initializeSourceFromHa\(\)/);
+  assert.match(panel, /const initializeSource = this\.shadowRoot\.getElementById\([\s\S]+"initialize-source-from-ha"[\s\S]+\)/);
+  assert.match(panel, /initializeSource\.onclick = \(\) => this\._initializeSourceFromHa\(\)/);
   assert.match(canInitialize, /this\._selectedDashboard/);
   assert.match(canInitialize, /this\._sourceDocument/);
   assert.match(canInitialize, /this\._sourceStatus !== "Checking"/);
@@ -145,6 +146,8 @@ test("Compare uses baseline terminology and Deployment keeps true deployment lab
   const compareSection = methodBody(panel, "_renderCompareSection()");
   const compareBody = methodBody(panel, "_renderCompareBody()");
   const deploymentSection = methodBody(panel, "_renderDeploymentSection()");
+  const deploymentBaseline = methodBody(panel, "_renderDeploymentBaseline()");
+  const deploymentImportNote = methodBody(panel, "_renderDeploymentImportNote()");
 
   assert.match(compareSection, /<dt>Baseline snapshot<\/dt>/);
   assert.match(compareSection, /<dt>Baseline origin<\/dt>/);
@@ -155,8 +158,9 @@ test("Compare uses baseline terminology and Deployment keeps true deployment lab
   assert.match(compareBody, /Baseline -> Current Home Assistant/);
   assert.match(compareBody, /Baseline configuration snapshot is unavailable/);
   assert.doesNotMatch(compareBody, /last deployment|Last deployed/);
-  assert.match(deploymentSection, /baselineOrigin === "deployment"[\s\S]+<dt>Last deployed<\/dt>/);
-  assert.match(deploymentSection, /baselineOrigin === "ha_import"[\s\S]+This Source was imported from Home Assistant/);
+  assert.match(deploymentSection, /this\._renderDeploymentBaseline\(\)/);
+  assert.match(deploymentBaseline, /baselineOrigin === "deployment"[\s\S]+<dt>Last deployed<\/dt>/);
+  assert.match(deploymentImportNote, /baselineOrigin === "ha_import"[\s\S]+This Source was imported from Home Assistant/);
   assert.match(panel, /if \(origin === "ha_import"\)[\s\S]+return "Imported from Home Assistant"/);
 });
 
@@ -245,6 +249,98 @@ test("workspace shell keeps the existing Source editor host in the editor region
   assert.match(panel, /class="source-code-editor-shell"[\s\S]+id="source-code-editor-host"/);
   assert.match(panel, /id="source-code-editor-host"/);
   assert.match(panel, /_attachSourceEditor\(\);/);
+});
+
+test("routine hass updates refresh existing DOM instead of full-rendering the panel", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const hassSetter = methodBody(panel, "set hass(hass)");
+  const routineRefresh = methodBody(panel, "_refreshRoutineUi()");
+
+  assert.match(hassSetter, /this\._hass = hass/);
+  assert.match(hassSetter, /this\._refreshRoutineUi\(\)/);
+  assert.doesNotMatch(hassSetter, /this\._render\(\)/);
+  assert.match(routineRefresh, /if \(!this\._hasRendered\)/);
+  assert.match(routineRefresh, /this\._refreshExplorerUi\(\)/);
+  assert.match(routineRefresh, /this\._refreshSourceEditorUi\(\)/);
+  assert.match(routineRefresh, /this\._refreshSyncUi\(\)/);
+  assert.match(routineRefresh, /this\._wireEventHandlers\(/);
+});
+
+test("routine refresh paths do not detach or recreate the active Source editor", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const routineRefresh = methodBody(panel, "_refreshRoutineUi()");
+  const loadStatus = methodBody(panel, "async _loadStatus()");
+  const loadDashboards =
+    panel.match(/async _loadDashboards\(\{ force = false \} = \{\}\) \{[\s\S]+?\n  \}/)?.[0] ?? "";
+
+  assert.doesNotMatch(routineRefresh, /innerHTML = `[\s\S]+source-code-editor-host/);
+  assert.doesNotMatch(routineRefresh, /_attachSourceEditor|_destroySourceEditor|createSourceCodeEditor/);
+  assert.doesNotMatch(loadStatus, /this\._render\(\)/);
+  assert.match(loadStatus, /this\._refreshRoutineUi\(\)/);
+  assert.match(loadDashboards, /this\._refreshRoutineUi\(\)/);
+  assert.notEqual(loadDashboards, "", "Missing _loadDashboards method");
+  assert.doesNotMatch(loadDashboards, /this\._render\(\)/);
+});
+
+test("partial refresh helpers do not replace the Source editor host", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const refreshHelpers = [
+    "_refreshApplicationHeader()",
+    "_refreshExplorerUi()",
+    "_refreshEditorContextUi()",
+    "_refreshSourceEditorUi()",
+    "_refreshSyncUi()",
+    "_refreshDeploymentUi()",
+    "_refreshInspectorUi()",
+  ];
+
+  for (const helper of refreshHelpers) {
+    assert.doesNotMatch(methodBody(panel, helper), /source-code-editor-host|_attachSourceEditor|_destroySourceEditor|createSourceCodeEditor/);
+  }
+});
+
+test("disconnect invalidates rendered DOM after destroying the Source editor", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const disconnected = methodBody(panel, "disconnectedCallback()");
+
+  assert.match(disconnected, /this\._destroySourceEditor\(\)/);
+  assert.match(disconnected, /this\._disconnectInspectorResizeObserver\(\)/);
+  assert.match(disconnected, /this\._hasRendered = false/);
+});
+
+test("reconnect recreates the editor instead of reusing a destroyed EditorView", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const connected = methodBody(panel, "connectedCallback()");
+  const routineRefresh = methodBody(panel, "_refreshRoutineUi()");
+  const render = methodBody(panel, "_render()");
+
+  assert.match(connected, /if \(!this\._hasRendered\)[\s\S]+this\._render\(\)/);
+  assert.match(routineRefresh, /if \(!this\._hasRendered\)[\s\S]+if \(this\.isConnected\)[\s\S]+this\._render\(\)/);
+  assert.match(render, /this\._hasRendered = true/);
+  assert.match(render, /this\._attachSourceEditor\(\)/);
+});
+
+test("full renders preserve same-document editor viewport and focus defensively", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const render = methodBody(panel, "_render()");
+
+  assert.match(render, /documentId: this\._sourceEditorDocumentId/);
+  assert.match(render, /hadFocus: this\._sourceEditor\.hasFocus\(\)/);
+  assert.match(render, /effect: this\._sourceEditor\.captureViewportSnapshot\(\)/);
+  assert.match(render, /shouldRestoreEditorViewportSnapshot\(editorViewportSnapshot/);
+  assert.match(render, /this\._sourceEditor\.restoreViewportSnapshot/);
+  assert.match(render, /shouldRestoreEditorFocusSnapshot\(editorViewportSnapshot/);
+  assert.match(render, /this\._sourceEditor\.focus\(\)/);
+});
+
+test("document switches still reset document-specific editor state", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const selectDashboard = methodBody(panel, "_selectDashboard(dashboard)");
+  const attachSourceEditor = methodBody(panel, "_attachSourceEditor()");
+
+  assert.match(selectDashboard, /this\._destroySourceEditor\(\)/);
+  assert.match(attachSourceEditor, /if \(this\._sourceEditorDocumentId !== documentId\)/);
+  assert.match(attachSourceEditor, /this\._replaceSourceEditorText\(this\._sourceText, documentId,[\s\S]+resetHistory: true/);
 });
 
 function methodBody(source, signature) {
