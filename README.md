@@ -366,22 +366,22 @@ Assistant has already removed.
 
 ## Synchronization States
 
-`NOT DEPLOYED`  
+`NOT DEPLOYED`
 The Source Document has no synchronization baseline.
 
-`IN SYNC`  
+`IN SYNC`
 Saved Source semantics match the current Home Assistant dashboard and the baseline.
 
-`SOURCE MODIFIED`  
+`SOURCE MODIFIED`
 Saved Source changed since the baseline while Home Assistant still matches it.
 
-`HA MODIFIED`  
+`HA MODIFIED`
 Home Assistant changed since the baseline while saved Source still matches it.
 
-`BOTH MODIFIED`  
+`BOTH MODIFIED`
 Saved Source and Home Assistant both changed since the baseline.
 
-`SYNC ERROR`  
+`SYNC ERROR`
 Synchronization status could not be calculated.
 
 `Source vs HA` is a separate direct comparison between current saved Source semantics
