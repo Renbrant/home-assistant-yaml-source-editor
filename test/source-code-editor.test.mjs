@@ -6,6 +6,7 @@ import {
   editorTextFromDocument,
   handleSourceEditorKeydown,
   shouldNotifyEditorChange,
+  shouldRestoreEditorFocusSnapshot,
   shouldRestoreEditorViewportSnapshot,
   stopHostKeydownPropagation,
 } from "../custom_components/ha_yaml_source_editor/frontend/source-code-editor.mjs";
@@ -158,6 +159,47 @@ test("editor viewport snapshot restores only for the same editor and document", 
   assert.equal(
     shouldRestoreEditorViewportSnapshot(null, {
       editor,
+      documentId: "source-document-1",
+    }),
+    false
+  );
+});
+
+test("editor focus snapshot restores only for same focused editor and document", () => {
+  const editor = {};
+  const replacementEditor = {};
+  const effect = {};
+  const snapshot = {
+    editor,
+    documentId: "source-document-1",
+    hadFocus: true,
+    effect,
+  };
+
+  assert.equal(
+    shouldRestoreEditorFocusSnapshot(snapshot, {
+      editor,
+      documentId: "source-document-1",
+    }),
+    true
+  );
+  assert.equal(
+    shouldRestoreEditorFocusSnapshot({ ...snapshot, hadFocus: false }, {
+      editor,
+      documentId: "source-document-1",
+    }),
+    false
+  );
+  assert.equal(
+    shouldRestoreEditorFocusSnapshot(snapshot, {
+      editor,
+      documentId: "source-document-2",
+    }),
+    false
+  );
+  assert.equal(
+    shouldRestoreEditorFocusSnapshot(snapshot, {
+      editor: replacementEditor,
       documentId: "source-document-1",
     }),
     false
