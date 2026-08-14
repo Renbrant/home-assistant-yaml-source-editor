@@ -73,6 +73,18 @@ export function handleSourceEditorKeydown(event, _view) {
   return stopHostKeydownPropagation(event);
 }
 
+export function shouldRestoreEditorViewportSnapshot(
+  snapshot,
+  { editor, documentId }
+) {
+  return Boolean(
+    snapshot?.editor &&
+    snapshot.editor === editor &&
+    snapshot.documentId === documentId &&
+    snapshot.effect
+  );
+}
+
 class SourceCodeEditor {
   constructor({ parent, doc, onChange, onStatusChange }) {
     this._onChange = onChange;
@@ -139,6 +151,16 @@ class SourceCodeEditor {
   attach(parent) {
     if (this.view.dom.parentElement !== parent) {
       parent.appendChild(this.view.dom);
+    }
+  }
+
+  captureViewportSnapshot() {
+    return this.view.scrollSnapshot();
+  }
+
+  restoreViewportSnapshot(snapshot) {
+    if (snapshot) {
+      this.view.dispatch({ effects: snapshot });
     }
   }
 
