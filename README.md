@@ -14,7 +14,7 @@ organization can disappear. HA YAML Source Editor keeps a separate raw **Source 
 document as the editable source of truth and deploys validated configuration through
 Home Assistant's supported Lovelace WebSocket API.
 
-**Current release: v0.2.0**
+**Current release: v0.2.1**
 
 ![HA YAML Source Editor workspace](Photos/Screenshots/workspace.png)
 
