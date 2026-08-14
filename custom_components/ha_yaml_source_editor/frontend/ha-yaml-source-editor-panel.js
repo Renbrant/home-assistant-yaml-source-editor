@@ -27,6 +27,7 @@ import {
   assessFinalOverwriteRead,
   assessOverwritePreflight,
 } from "./conflict-resolution-logic.mjs";
+import { isBlankSourceText } from "./source-bootstrap.mjs";
 
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const INSPECTOR_WIDE_LAYOUT_MIN_WIDTH = 1100;
@@ -67,6 +68,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceText = "";
     this._lastSavedSourceText = "";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._sourceRequestId = 0;
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
@@ -272,6 +274,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._destroySourceEditor();
     this._lastSavedSourceText = "";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._sourceRequestId += 1;
     this._clearValidation();
     this._clearSyncState();
@@ -311,6 +314,29 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._selectedDashboard &&
       !this._sourceDocument &&
       this._sourceStatus === "No document"
+    );
+  }
+
+  _isSavedSourceBlank(sourceText = this._lastSavedSourceText) {
+    return isBlankSourceText(sourceText);
+  }
+
+  _canInitializeSourceFromHa() {
+    return Boolean(
+      this._selectedDashboard &&
+      this._sourceDocument &&
+      this._sourceStatus !== "Checking" &&
+      this._sourceStatus !== "Loading" &&
+      this._sourceStatus !== "Creating" &&
+      this._sourceStatus !== "Saving" &&
+      this._sourceStatus !== "Error" &&
+      this._isSavedSourceBlank() &&
+      !this._hasUnsavedSourceChanges() &&
+      !this._isDeploymentInProgress() &&
+      !this._isResolutionInProgress() &&
+      this._validationStatus !== "Validating" &&
+      this._compareStatus !== "Loading" &&
+      this._syncStatus !== "Calculating"
     );
   }
 
@@ -482,6 +508,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const compareStatus = this.shadowRoot.getElementById("compare-status-value");
     const compareBody = this.shadowRoot.getElementById("compare-body");
     const createButton = this.shadowRoot.getElementById("create-source-document");
+    const initializeButton = this.shadowRoot.getElementById(
+      "initialize-source-from-ha"
+    );
     const saveButton = this.shadowRoot.getElementById("save-source-document");
     const validateButton = this.shadowRoot.getElementById("validate-source-document");
     const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
@@ -501,6 +530,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     if (createButton) {
       createButton.disabled = !this._canCreateSourceDocument();
+    }
+
+    if (initializeButton) {
+      initializeButton.disabled = !this._canInitializeSourceFromHa();
     }
 
     if (validationStatus) {
@@ -750,6 +783,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       );
       this._sourceStatus = "Loaded";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearValidation();
       this._clearComparison();
       this._scheduleSyncRefresh();
@@ -761,6 +795,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = null;
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to load Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
@@ -775,6 +810,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId = requestId;
     this._sourceStatus = "Creating";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._render();
 
     try {
@@ -797,6 +833,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       });
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearValidation();
       this._clearComparison();
       this._scheduleSyncRefresh();
@@ -807,6 +844,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to create Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
@@ -821,6 +859,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId = requestId;
     this._sourceStatus = "Saving";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._render();
 
     try {
@@ -843,6 +882,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       );
       this._sourceStatus = "Saved";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearComparison();
       this._scheduleSyncRefresh();
     } catch (err) {
@@ -852,9 +892,127 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to save Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
+  }
+
+  async _initializeSourceFromHa() {
+    if (!this._canInitializeSourceFromHa()) {
+      return;
+    }
+
+    this._sourceMessage = "Initialization confirmation required.";
+    this._render();
+
+    if (!this._confirmInitializeFromHa()) {
+      this._sourceMessage = "Initialization cancelled.";
+      this._render();
+      return;
+    }
+
+    const requestId = this._resolutionRequestId + 1;
+    this._resolutionRequestId = requestId;
+    this._resolutionStatus = RESOLUTION_OPERATION.PREPARING_IMPORT;
+    this._resolutionMessage = null;
+    this._sourceMessage = "Preparing Source initialization from Home Assistant.";
+    this._render();
+
+    try {
+      const documentId = this._sourceDocument.document_id;
+      const freshDocument = await this._fetchSourceDocument(documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      if (freshDocument.document_id !== documentId) {
+        throw new ResolutionBlockedError("Source Document changed. Try again.");
+      }
+
+      if (!this._isSavedSourceBlank(freshDocument.source_text)) {
+        throw new ResolutionBlockedError(
+          "Source Document is no longer empty. Initialization is only available for blank Source Documents."
+        );
+      }
+
+      if (this._hasUnsavedSourceChanges()) {
+        throw new ResolutionBlockedError(
+          "Save or discard editor changes before initializing from Home Assistant."
+        );
+      }
+
+      await this._requireSelectedStorageTarget();
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const currentHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const preparedImport = await this._prepareHaImportSource(currentHaConfig);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      if (this._hasUnsavedSourceChanges()) {
+        throw new ResolutionBlockedError(
+          "Save or discard editor changes before initializing from Home Assistant."
+        );
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.IMPORTING;
+      this._resolutionMessage = null;
+      this._sourceMessage = "Initializing Source from Home Assistant.";
+      this._render();
+
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/import_ha_version",
+        document_id: freshDocument.document_id,
+        expected_source_updated_at: freshDocument.updated_at,
+        source_text: preparedImport.sourceText,
+        source_semantic_hash: preparedImport.sourceSemanticHash,
+        ha_semantic_hash: preparedImport.haSemanticHash,
+        ha_canonical_json: preparedImport.haCanonicalJson,
+        home_assistant_version: this._homeAssistantVersion(),
+      });
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._sourceDocument = result.document;
+      this._sourceText = result.document.source_text;
+      this._lastSavedSourceText = result.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id,
+        { resetHistory: true }
+      );
+      this._sourceStatus = "Saved";
+      this._config = currentHaConfig;
+      this._configStatus = "Loaded";
+      this._clearValidation();
+      this._clearComparison();
+      this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+      this._resolutionMessage = null;
+      this._sourceMessage = "Source initialized from Home Assistant.";
+      await this._refreshSyncStatus({ reloadHa: true });
+    } catch (err) {
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+      this._resolutionMessage = null;
+      this._sourceMessage =
+        err?.message || "Unable to initialize Source from Home Assistant.";
+      this._render();
+    }
   }
 
   async _deploySavedSource() {
@@ -1325,40 +1483,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         return;
       }
 
-      const haCanonicalJson = canonicalJson(currentHaConfig);
-      const haSemanticHash = await this._hashText(haCanonicalJson);
+      const preparedImport = await this._prepareHaImportSource(currentHaConfig);
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      if (haSemanticHash !== snapshot.haSemanticHash) {
+      if (preparedImport.haSemanticHash !== snapshot.haSemanticHash) {
         throw new StaleComparisonError(
           "Home Assistant changed since comparison. Compare again."
-        );
-      }
-
-      const importedSourceText = haConfigToSourceYaml(currentHaConfig);
-      if (utf8Length(importedSourceText) > MAX_IMPORTED_SOURCE_BYTES) {
-        throw new ResolutionBlockedError(
-          "Imported Source YAML exceeds the 2 MiB Source Document limit."
-        );
-      }
-
-      const importedAnalysis = analyzeSourceText(importedSourceText);
-      if (!importedAnalysis.validation.valid) {
-        throw new ResolutionBlockedError(
-          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
-        );
-      }
-
-      const importedSemanticHash = await this._hashText(
-        canonicalJson(importedAnalysis.parsedConfig)
-      );
-      if (requestId !== this._resolutionRequestId) {
-        return;
-      }
-      if (importedSemanticHash !== haSemanticHash) {
-        throw new ResolutionBlockedError(
-          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
         );
       }
 
@@ -1386,12 +1517,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      const finalHaCanonicalJson = canonicalJson(finalHaConfig);
-      const finalHaHash = await this._hashText(finalHaCanonicalJson);
+      const finalImport = await this._prepareHaImportSource(finalHaConfig);
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      if (finalHaHash !== snapshot.haSemanticHash) {
+      if (finalImport.haSemanticHash !== snapshot.haSemanticHash) {
         throw new StaleComparisonError(
           "Home Assistant changed since comparison. Compare again."
         );
@@ -1405,10 +1535,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         type: "ha_yaml_source_editor/documents/import_ha_version",
         document_id: snapshot.documentId,
         expected_source_updated_at: snapshot.documentUpdatedAt,
-        source_text: importedSourceText,
-        source_semantic_hash: importedSemanticHash,
-        ha_semantic_hash: finalHaHash,
-        ha_canonical_json: finalHaCanonicalJson,
+        source_text: finalImport.sourceText,
+        source_semantic_hash: finalImport.sourceSemanticHash,
+        ha_semantic_hash: finalImport.haSemanticHash,
+        ha_canonical_json: finalImport.haCanonicalJson,
         home_assistant_version: this._homeAssistantVersion(),
       });
       if (requestId !== this._resolutionRequestId) {
@@ -1654,6 +1784,41 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return result.document;
   }
 
+  async _prepareHaImportSource(haConfig) {
+    const haCanonicalJson = canonicalJson(haConfig);
+    const haSemanticHash = await this._hashText(haCanonicalJson);
+    const sourceText = haConfigToSourceYaml(haConfig);
+
+    if (utf8Length(sourceText) > MAX_IMPORTED_SOURCE_BYTES) {
+      throw new ResolutionBlockedError(
+        "Imported Source YAML exceeds the 2 MiB Source Document limit."
+      );
+    }
+
+    const sourceAnalysis = analyzeSourceText(sourceText);
+    if (!sourceAnalysis.validation.valid) {
+      throw new ResolutionBlockedError(
+        "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+      );
+    }
+
+    const sourceSemanticHash = await this._hashText(
+      canonicalJson(sourceAnalysis.parsedConfig)
+    );
+    if (sourceSemanticHash !== haSemanticHash) {
+      throw new ResolutionBlockedError(
+        "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+      );
+    }
+
+    return {
+      sourceText,
+      sourceSemanticHash,
+      haSemanticHash,
+      haCanonicalJson,
+    };
+  }
+
   _isDeploymentInProgress() {
     return [
       DEPLOYMENT_OPERATION.PREFLIGHT,
@@ -1734,6 +1899,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         "This will REPLACE the saved Source Document.\n\n" +
         "Comments, blank lines, quoting, formatting, and manual YAML organization from the previous Source may be permanently lost.\n\n" +
         "The Home Assistant dashboard itself will NOT be modified.\n\n" +
+        "Continue?"
+    );
+  }
+
+  _confirmInitializeFromHa() {
+    return window.confirm(
+      "Initialize Source from Home Assistant?\n\n" +
+        "This will populate the empty Source Document using Home Assistant's current normalized dashboard configuration.\n\n" +
+        "Comments, blank lines, quoting, and formatting previously removed by Home Assistant cannot be recovered.\n\n" +
+        "This does not deploy anything to Home Assistant.\n\n" +
         "Continue?"
     );
   }
@@ -2011,9 +2186,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <dt>Source status</dt>
           <dd id="source-status-value" class="${statusClass.trim()}">${this._escapeHtml(sourceStatus)}</dd>
         </dl>
+        ${this._renderSourceMessage()}
         ${this._renderSourceDocumentBody()}
       </section>
     `;
+  }
+
+  _renderSourceMessage() {
+    return this._sourceMessage
+      ? `<p class="state">${this._escapeHtml(this._sourceMessage)}</p>`
+      : "";
   }
 
   _renderSourceDocumentBody() {
@@ -2048,6 +2230,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           configuration. Validate checks the current editor text and does not
           save or deploy it.
         </p>
+        ${
+          this._isSavedSourceBlank()
+            ? `<p class="state">This Source Document is empty. Enter YAML manually or use Initialize from HA to start from Home Assistant's current dashboard configuration.</p>`
+            : ""
+        }
         <div class="source-code-editor-shell">
           <div id="source-code-editor-host"></div>
           <div id="source-editor-status" class="source-editor-status"></div>
@@ -2272,6 +2459,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _renderCompareSection() {
     const statusClass = this._compareStatus === "Error" ? " error" : "";
+    const baseline = this._sourceDocument?.deployment_baseline ?? null;
+    const baselineOrigin = baseline?.origin ?? null;
 
     return `
       <section class="section">
@@ -2281,12 +2470,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <dd id="compare-status-value" class="${statusClass.trim()}">${this._escapeHtml(
             this._compareStatus
           )}</dd>
-          <dt>Last deployed snapshot</dt>
+          <dt>Baseline snapshot</dt>
           <dd>${this._escapeHtml(
-            this._sourceDocument?.deployment_baseline?.deployed_canonical_json
+            baseline?.deployed_canonical_json
               ? "Available"
               : "Unavailable"
           )}</dd>
+          <dt>Baseline origin</dt>
+          <dd>${this._escapeHtml(this._formatBaselineOrigin(baselineOrigin))}</dd>
         </dl>
         <div id="compare-body">${this._renderCompareBody()}</div>
       </section>
@@ -2333,17 +2524,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           Array reordering may appear as multiple indexed changes.
         </p>
         ${this._renderDiffGroup(
-          "Changes in Saved Source since last deployment",
-          "Last deployed -> Saved Source",
+          "Changes in Saved Source since baseline",
+          "Baseline -> Saved Source",
           this._compareResult.sourceChanges,
-          "Last deployed",
+          "Baseline",
           "Saved Source"
         )}
         ${this._renderDiffGroup(
-          "Changes in Home Assistant since last deployment",
-          "Last deployed -> Current Home Assistant",
+          "Changes in Home Assistant since baseline",
+          "Baseline -> Current Home Assistant",
           this._compareResult.haChanges,
-          "Last deployed",
+          "Baseline",
           "Current HA"
         )}
         ${this._renderDiffGroup(
@@ -2358,7 +2549,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     return `
       <p class="state">
-        Last deployed configuration snapshot is unavailable for this baseline.
+        Baseline configuration snapshot is unavailable.
         Showing current Source vs Home Assistant only.
       </p>
       <p class="state">
@@ -2577,12 +2768,18 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         ? "disabled"
         : "";
     const createDisabled = this._canCreateSourceDocument() ? "" : "disabled";
+    const initializeDisabled = this._canInitializeSourceFromHa()
+      ? ""
+      : "disabled";
 
     return `
       <nav class="command-bar" aria-label="Source workflow commands">
         <div class="workflow-actions" aria-label="Source workflow">
           <button type="button" id="create-source-document" ${createDisabled}>
             Create Source
+          </button>
+          <button type="button" id="initialize-source-from-ha" ${initializeDisabled}>
+            Initialize from HA
           </button>
           <button type="button" id="save-source-document" ${saveDisabled}>
             Save Source
@@ -3691,6 +3888,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this.shadowRoot
       .getElementById("create-source-document")
       ?.addEventListener("click", () => this._createSourceDocument());
+
+    this.shadowRoot
+      .getElementById("initialize-source-from-ha")
+      ?.addEventListener("click", () => this._initializeSourceFromHa());
 
     this.shadowRoot
       .getElementById("save-source-document")

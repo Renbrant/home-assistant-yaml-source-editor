@@ -39,11 +39,13 @@ test("panel exposes primary Source workflow commands inside the editor region", 
 
   assert.match(panel, /class="command-bar"[\s\S]+aria-label="Source workflow commands"/);
   assert.match(panel, /id="create-source-document"[\s\S]+Create Source/);
+  assert.match(panel, /id="initialize-source-from-ha"[\s\S]+Initialize from HA/);
   assert.match(panel, /id="save-source-document"[\s\S]+Save Source/);
   assert.match(panel, /id="validate-source-document"[\s\S]+Validate/);
   assert.match(panel, /id="compare-source-ha"[\s\S]+Compare/);
   assert.match(panel, /id="deploy-saved-source"[\s\S]+Deploy/);
   assert.equal([...panel.matchAll(/id="create-source-document"/g)].length, 1);
+  assert.equal([...panel.matchAll(/id="initialize-source-from-ha"/g)].length, 1);
   assert.equal([...panel.matchAll(/id="save-source-document"/g)].length, 1);
   assert.equal([...panel.matchAll(/id="validate-source-document"/g)].length, 1);
   assert.equal([...panel.matchAll(/id="compare-source-ha"/g)].length, 1);
@@ -65,8 +67,97 @@ test("Create Source command reuses existing creation wiring and state", async ()
   assert.match(panel, /const createDisabled = this\._canCreateSourceDocument\(\) \? "" : "disabled"/);
   assert.match(panel, /id="create-source-document" \${createDisabled}/);
   assert.match(panel, /\.getElementById\("create-source-document"\)[\s\S]+this\._createSourceDocument\(\)/);
+  assert.match(panel, /this\._sourceStatus === "No document"/);
   assert.doesNotMatch(panel, /Create Source Document[\s\S]+<\/button>/);
   assert.match(panel, /No source document exists for this dashboard\./);
+});
+
+test("Initialize from HA command is an editor-scoped empty Source bootstrap action", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const commandBar = panel.match(
+    /<nav class="command-bar"[\s\S]+?<\/nav>/
+  )?.[0] ?? "";
+  const canInitialize = methodBody(panel, "_canInitializeSourceFromHa()");
+
+  assert.match(commandBar, /id="create-source-document"[\s\S]+id="initialize-source-from-ha"[\s\S]+id="save-source-document"/);
+  assert.match(panel, /const initializeDisabled = this\._canInitializeSourceFromHa\(\)[\s\S]+\?[\s\S]+""[\s\S]+:[\s\S]+"disabled"/);
+  assert.match(panel, /\.getElementById\("initialize-source-from-ha"\)[\s\S]+this\._initializeSourceFromHa\(\)/);
+  assert.match(canInitialize, /this\._selectedDashboard/);
+  assert.match(canInitialize, /this\._sourceDocument/);
+  assert.match(canInitialize, /this\._sourceStatus !== "Checking"/);
+  assert.match(canInitialize, /this\._sourceStatus !== "Loading"/);
+  assert.match(canInitialize, /this\._sourceStatus !== "Creating"/);
+  assert.match(canInitialize, /this\._sourceStatus !== "Saving"/);
+  assert.match(canInitialize, /this\._isSavedSourceBlank\(\)/);
+  assert.match(canInitialize, /!this\._hasUnsavedSourceChanges\(\)/);
+  assert.match(canInitialize, /!this\._isDeploymentInProgress\(\)/);
+  assert.match(canInitialize, /!this\._isResolutionInProgress\(\)/);
+  assert.match(canInitialize, /this\._validationStatus !== "Validating"/);
+  assert.match(canInitialize, /this\._compareStatus !== "Loading"/);
+  assert.match(canInitialize, /this\._syncStatus !== "Calculating"/);
+});
+
+test("Initialize from HA reuses HA import conversion and persistence without Lovelace save", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const prepareImport = methodBody(panel, "async _prepareHaImportSource(haConfig)");
+  const initialize = methodBody(panel, "async _initializeSourceFromHa()");
+  const conflictImport = methodBody(panel, "async _importHaVersion()");
+  const canResolve = methodBody(panel, "_canResolveFromCompare()");
+
+  assert.match(prepareImport, /haConfigToSourceYaml\(haConfig\)/);
+  assert.match(prepareImport, /analyzeSourceText\(sourceText\)/);
+  assert.match(prepareImport, /canonicalJson\(sourceAnalysis\.parsedConfig\)/);
+  assert.match(initialize, /this\._readDashboardConfig\([\s\S]+force: true/);
+  assert.match(initialize, /this\._prepareHaImportSource\(currentHaConfig\)/);
+  assert.match(initialize, /type: "ha_yaml_source_editor\/documents\/import_ha_version"/);
+  assert.match(initialize, /document_id: freshDocument\.document_id/);
+  assert.match(initialize, /expected_source_updated_at: freshDocument\.updated_at/);
+  assert.match(initialize, /this\._replaceSourceEditorText\([\s\S]+resetHistory: true/);
+  assert.match(initialize, /this\._clearValidation\(\)/);
+  assert.match(initialize, /this\._clearComparison\(\)/);
+  assert.match(initialize, /this\._refreshSyncStatus\(\{ reloadHa: true \}\)/);
+  assert.doesNotMatch(initialize, /lovelace\/config\/save|_asyncSaveLovelaceConfig/);
+  assert.match(conflictImport, /if \(!this\._canResolveFromCompare\(\)\)/);
+  assert.match(conflictImport, /this\._prepareHaImportSource\(currentHaConfig\)/);
+  assert.match(conflictImport, /this\._prepareHaImportSource\(finalHaConfig\)/);
+  assert.match(canResolve, /this\._compareStatus !== "Ready"/);
+  assert.match(canResolve, /!this\._compareSnapshot/);
+  assert.match(canResolve, /this\._sourceVsHa !== "DIFFERENT"/);
+});
+
+test("Initialize from HA success is presented as Source context, not conflict resolution", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const initialize = methodBody(panel, "async _initializeSourceFromHa()");
+  const conflictImport = methodBody(panel, "async _importHaVersion()");
+  const sourceSection = methodBody(panel, "_renderSourceDocumentSection()");
+
+  assert.match(initialize, /this\._sourceMessage = "Source initialized from Home Assistant\."/);
+  assert.match(initialize, /this\._resolutionStatus = RESOLUTION_OPERATION\.IDLE/);
+  assert.match(initialize, /this\._resolutionMessage = null/);
+  assert.doesNotMatch(initialize, /this\._resolutionStatus = RESOLUTION_OPERATION\.SUCCESS/);
+  assert.match(sourceSection, /this\._renderSourceMessage\(\)/);
+  assert.match(conflictImport, /this\._resolutionStatus = RESOLUTION_OPERATION\.SUCCESS/);
+  assert.match(conflictImport, /this\._resolutionMessage = "Home Assistant version imported as Source\."/);
+});
+
+test("Compare uses baseline terminology and Deployment keeps true deployment labels", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const compareSection = methodBody(panel, "_renderCompareSection()");
+  const compareBody = methodBody(panel, "_renderCompareBody()");
+  const deploymentSection = methodBody(panel, "_renderDeploymentSection()");
+
+  assert.match(compareSection, /<dt>Baseline snapshot<\/dt>/);
+  assert.match(compareSection, /<dt>Baseline origin<\/dt>/);
+  assert.doesNotMatch(compareSection, /Last deployed snapshot/);
+  assert.match(compareBody, /Changes in Saved Source since baseline/);
+  assert.match(compareBody, /Changes in Home Assistant since baseline/);
+  assert.match(compareBody, /Baseline -> Saved Source/);
+  assert.match(compareBody, /Baseline -> Current Home Assistant/);
+  assert.match(compareBody, /Baseline configuration snapshot is unavailable/);
+  assert.doesNotMatch(compareBody, /last deployment|Last deployed/);
+  assert.match(deploymentSection, /baselineOrigin === "deployment"[\s\S]+<dt>Last deployed<\/dt>/);
+  assert.match(deploymentSection, /baselineOrigin === "ha_import"[\s\S]+This Source was imported from Home Assistant/);
+  assert.match(panel, /if \(origin === "ha_import"\)[\s\S]+return "Imported from Home Assistant"/);
 });
 
 test("Explorer omits normal Integration API status card and keeps navigation", async () => {
@@ -155,3 +246,29 @@ test("workspace shell keeps the existing Source editor host in the editor region
   assert.match(panel, /id="source-code-editor-host"/);
   assert.match(panel, /_attachSourceEditor\(\);/);
 });
+
+function methodBody(source, signature) {
+  let start = source.indexOf(`\n  ${signature}`);
+  if (start === -1) {
+    start = source.indexOf(signature);
+  }
+  assert.notEqual(start, -1, `Missing method: ${signature}`);
+
+  const bodyStart = source.indexOf("{", start);
+  assert.notEqual(bodyStart, -1, `Missing method body: ${signature}`);
+
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") {
+      depth += 1;
+    } else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(bodyStart + 1, index);
+      }
+    }
+  }
+
+  throw new Error(`Unterminated method body: ${signature}`);
+}
