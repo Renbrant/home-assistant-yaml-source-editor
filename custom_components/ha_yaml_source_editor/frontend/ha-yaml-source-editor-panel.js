@@ -27,8 +27,10 @@ import {
   assessFinalOverwriteRead,
   assessOverwritePreflight,
 } from "./conflict-resolution-logic.mjs";
+import { isBlankSourceText } from "./source-bootstrap.mjs";
 
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
+const INSPECTOR_WIDE_LAYOUT_MIN_WIDTH = 1100;
 
 const RESOLUTION_OPERATION = {
   IDLE: "Idle",
@@ -66,6 +68,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceText = "";
     this._lastSavedSourceText = "";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._sourceRequestId = 0;
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
@@ -95,6 +98,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
     this._resolutionMessage = null;
     this._resolutionRequestId = 0;
+    this._inspectorTab = "status";
+    this._inspectorOpen = false;
+    this._inspectorUserToggled = false;
+    this._inspectorResizeObserver = null;
+    this._inspectorResizeTarget = null;
   }
 
   set hass(hass) {
@@ -112,6 +120,68 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   disconnectedCallback() {
     this._destroySourceEditor();
+    this._disconnectInspectorResizeObserver();
+  }
+
+  _disconnectInspectorResizeObserver() {
+    if (!this._inspectorResizeObserver) {
+      return;
+    }
+
+    this._inspectorResizeObserver.disconnect();
+    this._inspectorResizeObserver = null;
+    this._inspectorResizeTarget = null;
+  }
+
+  _syncInspectorResizeObserver() {
+    const panel = this.shadowRoot?.querySelector(".panel");
+    if (!panel) {
+      return;
+    }
+
+    if (typeof ResizeObserver === "undefined") {
+      this._applyResponsiveInspectorDefault(panel.getBoundingClientRect().width);
+      return;
+    }
+
+    if (!this._inspectorResizeObserver) {
+      this._inspectorResizeObserver = new ResizeObserver((entries) => {
+        const latestEntry = entries[entries.length - 1];
+        const width =
+          latestEntry?.contentRect?.width ??
+          this._inspectorResizeTarget?.getBoundingClientRect().width ??
+          0;
+        this._applyResponsiveInspectorDefault(width);
+      });
+    }
+
+    if (this._inspectorResizeTarget !== panel) {
+      if (this._inspectorResizeTarget) {
+        this._inspectorResizeObserver.unobserve(this._inspectorResizeTarget);
+      }
+      this._inspectorResizeTarget = panel;
+      this._inspectorResizeObserver.observe(panel);
+    }
+
+    this._applyResponsiveInspectorDefault(panel.getBoundingClientRect().width);
+  }
+
+  _applyResponsiveInspectorDefault(width) {
+    if (
+      this._inspectorUserToggled ||
+      !Number.isFinite(width) ||
+      width <= 0
+    ) {
+      return;
+    }
+
+    const shouldOpen = width > INSPECTOR_WIDE_LAYOUT_MIN_WIDTH;
+    if (this._inspectorOpen === shouldOpen) {
+      return;
+    }
+
+    this._inspectorOpen = shouldOpen;
+    this._render();
   }
 
   _canUseConnection() {
@@ -204,6 +274,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._destroySourceEditor();
     this._lastSavedSourceText = "";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._sourceRequestId += 1;
     this._clearValidation();
     this._clearSyncState();
@@ -227,6 +298,46 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _formatMode(mode) {
     return String(mode ?? "unknown").toUpperCase();
+  }
+
+  _sourceStateLabel() {
+    if (this._sourceStatus === "Error" || this._sourceStatus === "Saving") {
+      return this._sourceStatus;
+    }
+    return this._hasUnsavedSourceChanges()
+      ? "Unsaved changes"
+      : this._sourceStatus;
+  }
+
+  _canCreateSourceDocument() {
+    return Boolean(
+      this._selectedDashboard &&
+      !this._sourceDocument &&
+      this._sourceStatus === "No document"
+    );
+  }
+
+  _isSavedSourceBlank(sourceText = this._lastSavedSourceText) {
+    return isBlankSourceText(sourceText);
+  }
+
+  _canInitializeSourceFromHa() {
+    return Boolean(
+      this._selectedDashboard &&
+      this._sourceDocument &&
+      this._sourceStatus !== "Checking" &&
+      this._sourceStatus !== "Loading" &&
+      this._sourceStatus !== "Creating" &&
+      this._sourceStatus !== "Saving" &&
+      this._sourceStatus !== "Error" &&
+      this._isSavedSourceBlank() &&
+      !this._hasUnsavedSourceChanges() &&
+      !this._isDeploymentInProgress() &&
+      !this._isResolutionInProgress() &&
+      this._validationStatus !== "Validating" &&
+      this._compareStatus !== "Loading" &&
+      this._syncStatus !== "Calculating"
+    );
   }
 
   _dashboardTitle(dashboard) {
@@ -386,6 +497,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshSourceEditorUi() {
+    const editorSourceStatus = this.shadowRoot.getElementById(
+      "editor-source-status-value"
+    );
     const statusValue = this.shadowRoot.getElementById("source-status-value");
     const validationStatus = this.shadowRoot.getElementById(
       "validation-status-value"
@@ -393,6 +507,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const validationBody = this.shadowRoot.getElementById("validation-body");
     const compareStatus = this.shadowRoot.getElementById("compare-status-value");
     const compareBody = this.shadowRoot.getElementById("compare-body");
+    const createButton = this.shadowRoot.getElementById("create-source-document");
+    const initializeButton = this.shadowRoot.getElementById(
+      "initialize-source-from-ha"
+    );
     const saveButton = this.shadowRoot.getElementById("save-source-document");
     const validateButton = this.shadowRoot.getElementById("validate-source-document");
     const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
@@ -404,6 +522,18 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       statusValue.textContent = this._hasUnsavedSourceChanges()
         ? "Unsaved changes"
         : this._sourceStatus;
+    }
+
+    if (editorSourceStatus) {
+      editorSourceStatus.textContent = `Source: ${this._sourceStateLabel()}`;
+    }
+
+    if (createButton) {
+      createButton.disabled = !this._canCreateSourceDocument();
+    }
+
+    if (initializeButton) {
+      initializeButton.disabled = !this._canInitializeSourceFromHa();
     }
 
     if (validationStatus) {
@@ -472,6 +602,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshSyncUi() {
+    const editorSyncStatus = this.shadowRoot.getElementById(
+      "editor-sync-status-value"
+    );
     const statusValue = this.shadowRoot.getElementById("sync-status-value");
     const sourceVsHaValue = this.shadowRoot.getElementById("source-vs-ha-value");
     const sourceTextHash = this.shadowRoot.getElementById("source-text-hash");
@@ -489,6 +622,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     if (sourceVsHaValue) {
       sourceVsHaValue.textContent = this._sourceVsHa;
+    }
+
+    if (editorSyncStatus) {
+      editorSyncStatus.textContent = `Source vs HA: ${this._sourceVsHa}`;
     }
 
     if (sourceTextHash) {
@@ -646,6 +783,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       );
       this._sourceStatus = "Loaded";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearValidation();
       this._clearComparison();
       this._scheduleSyncRefresh();
@@ -657,6 +795,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       this._sourceDocument = null;
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to load Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
@@ -671,6 +810,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId = requestId;
     this._sourceStatus = "Creating";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._render();
 
     try {
@@ -693,6 +833,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       });
       this._sourceStatus = result.already_exists ? "Loaded" : "Not saved";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearValidation();
       this._clearComparison();
       this._scheduleSyncRefresh();
@@ -703,6 +844,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to create Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
@@ -717,6 +859,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId = requestId;
     this._sourceStatus = "Saving";
     this._sourceError = null;
+    this._sourceMessage = null;
     this._render();
 
     try {
@@ -739,6 +882,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       );
       this._sourceStatus = "Saved";
       this._sourceError = null;
+      this._sourceMessage = null;
       this._clearComparison();
       this._scheduleSyncRefresh();
     } catch (err) {
@@ -748,9 +892,127 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       this._sourceStatus = "Error";
       this._sourceError = err?.message || "Unable to save Source Document.";
+      this._sourceMessage = null;
     }
 
     this._render();
+  }
+
+  async _initializeSourceFromHa() {
+    if (!this._canInitializeSourceFromHa()) {
+      return;
+    }
+
+    this._sourceMessage = "Initialization confirmation required.";
+    this._render();
+
+    if (!this._confirmInitializeFromHa()) {
+      this._sourceMessage = "Initialization cancelled.";
+      this._render();
+      return;
+    }
+
+    const requestId = this._resolutionRequestId + 1;
+    this._resolutionRequestId = requestId;
+    this._resolutionStatus = RESOLUTION_OPERATION.PREPARING_IMPORT;
+    this._resolutionMessage = null;
+    this._sourceMessage = "Preparing Source initialization from Home Assistant.";
+    this._render();
+
+    try {
+      const documentId = this._sourceDocument.document_id;
+      const freshDocument = await this._fetchSourceDocument(documentId);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      if (freshDocument.document_id !== documentId) {
+        throw new ResolutionBlockedError("Source Document changed. Try again.");
+      }
+
+      if (!this._isSavedSourceBlank(freshDocument.source_text)) {
+        throw new ResolutionBlockedError(
+          "Source Document is no longer empty. Initialization is only available for blank Source Documents."
+        );
+      }
+
+      if (this._hasUnsavedSourceChanges()) {
+        throw new ResolutionBlockedError(
+          "Save or discard editor changes before initializing from Home Assistant."
+        );
+      }
+
+      await this._requireSelectedStorageTarget();
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const currentHaConfig = await this._readDashboardConfig(
+        this._selectedDashboard,
+        { force: true }
+      );
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      const preparedImport = await this._prepareHaImportSource(currentHaConfig);
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      if (this._hasUnsavedSourceChanges()) {
+        throw new ResolutionBlockedError(
+          "Save or discard editor changes before initializing from Home Assistant."
+        );
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.IMPORTING;
+      this._resolutionMessage = null;
+      this._sourceMessage = "Initializing Source from Home Assistant.";
+      this._render();
+
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/documents/import_ha_version",
+        document_id: freshDocument.document_id,
+        expected_source_updated_at: freshDocument.updated_at,
+        source_text: preparedImport.sourceText,
+        source_semantic_hash: preparedImport.sourceSemanticHash,
+        ha_semantic_hash: preparedImport.haSemanticHash,
+        ha_canonical_json: preparedImport.haCanonicalJson,
+        home_assistant_version: this._homeAssistantVersion(),
+      });
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._sourceDocument = result.document;
+      this._sourceText = result.document.source_text;
+      this._lastSavedSourceText = result.document.source_text;
+      this._replaceSourceEditorText(
+        this._sourceText,
+        this._sourceDocument.document_id,
+        { resetHistory: true }
+      );
+      this._sourceStatus = "Saved";
+      this._config = currentHaConfig;
+      this._configStatus = "Loaded";
+      this._clearValidation();
+      this._clearComparison();
+      this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+      this._resolutionMessage = null;
+      this._sourceMessage = "Source initialized from Home Assistant.";
+      await this._refreshSyncStatus({ reloadHa: true });
+    } catch (err) {
+      if (requestId !== this._resolutionRequestId) {
+        return;
+      }
+
+      this._resolutionStatus = RESOLUTION_OPERATION.IDLE;
+      this._resolutionMessage = null;
+      this._sourceMessage =
+        err?.message || "Unable to initialize Source from Home Assistant.";
+      this._render();
+    }
   }
 
   async _deploySavedSource() {
@@ -1221,40 +1483,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         return;
       }
 
-      const haCanonicalJson = canonicalJson(currentHaConfig);
-      const haSemanticHash = await this._hashText(haCanonicalJson);
+      const preparedImport = await this._prepareHaImportSource(currentHaConfig);
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      if (haSemanticHash !== snapshot.haSemanticHash) {
+      if (preparedImport.haSemanticHash !== snapshot.haSemanticHash) {
         throw new StaleComparisonError(
           "Home Assistant changed since comparison. Compare again."
-        );
-      }
-
-      const importedSourceText = haConfigToSourceYaml(currentHaConfig);
-      if (utf8Length(importedSourceText) > MAX_IMPORTED_SOURCE_BYTES) {
-        throw new ResolutionBlockedError(
-          "Imported Source YAML exceeds the 2 MiB Source Document limit."
-        );
-      }
-
-      const importedAnalysis = analyzeSourceText(importedSourceText);
-      if (!importedAnalysis.validation.valid) {
-        throw new ResolutionBlockedError(
-          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
-        );
-      }
-
-      const importedSemanticHash = await this._hashText(
-        canonicalJson(importedAnalysis.parsedConfig)
-      );
-      if (requestId !== this._resolutionRequestId) {
-        return;
-      }
-      if (importedSemanticHash !== haSemanticHash) {
-        throw new ResolutionBlockedError(
-          "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
         );
       }
 
@@ -1282,12 +1517,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      const finalHaCanonicalJson = canonicalJson(finalHaConfig);
-      const finalHaHash = await this._hashText(finalHaCanonicalJson);
+      const finalImport = await this._prepareHaImportSource(finalHaConfig);
       if (requestId !== this._resolutionRequestId) {
         return;
       }
-      if (finalHaHash !== snapshot.haSemanticHash) {
+      if (finalImport.haSemanticHash !== snapshot.haSemanticHash) {
         throw new StaleComparisonError(
           "Home Assistant changed since comparison. Compare again."
         );
@@ -1301,10 +1535,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         type: "ha_yaml_source_editor/documents/import_ha_version",
         document_id: snapshot.documentId,
         expected_source_updated_at: snapshot.documentUpdatedAt,
-        source_text: importedSourceText,
-        source_semantic_hash: importedSemanticHash,
-        ha_semantic_hash: finalHaHash,
-        ha_canonical_json: finalHaCanonicalJson,
+        source_text: finalImport.sourceText,
+        source_semantic_hash: finalImport.sourceSemanticHash,
+        ha_semantic_hash: finalImport.haSemanticHash,
+        ha_canonical_json: finalImport.haCanonicalJson,
         home_assistant_version: this._homeAssistantVersion(),
       });
       if (requestId !== this._resolutionRequestId) {
@@ -1550,6 +1784,41 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return result.document;
   }
 
+  async _prepareHaImportSource(haConfig) {
+    const haCanonicalJson = canonicalJson(haConfig);
+    const haSemanticHash = await this._hashText(haCanonicalJson);
+    const sourceText = haConfigToSourceYaml(haConfig);
+
+    if (utf8Length(sourceText) > MAX_IMPORTED_SOURCE_BYTES) {
+      throw new ResolutionBlockedError(
+        "Imported Source YAML exceeds the 2 MiB Source Document limit."
+      );
+    }
+
+    const sourceAnalysis = analyzeSourceText(sourceText);
+    if (!sourceAnalysis.validation.valid) {
+      throw new ResolutionBlockedError(
+        "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+      );
+    }
+
+    const sourceSemanticHash = await this._hashText(
+      canonicalJson(sourceAnalysis.parsedConfig)
+    );
+    if (sourceSemanticHash !== haSemanticHash) {
+      throw new ResolutionBlockedError(
+        "Home Assistant configuration could not be converted to Source YAML without changing its semantics."
+      );
+    }
+
+    return {
+      sourceText,
+      sourceSemanticHash,
+      haSemanticHash,
+      haCanonicalJson,
+    };
+  }
+
   _isDeploymentInProgress() {
     return [
       DEPLOYMENT_OPERATION.PREFLIGHT,
@@ -1630,6 +1899,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         "This will REPLACE the saved Source Document.\n\n" +
         "Comments, blank lines, quoting, formatting, and manual YAML organization from the previous Source may be permanently lost.\n\n" +
         "The Home Assistant dashboard itself will NOT be modified.\n\n" +
+        "Continue?"
+    );
+  }
+
+  _confirmInitializeFromHa() {
+    return window.confirm(
+      "Initialize Source from Home Assistant?\n\n" +
+        "This will populate the empty Source Document using Home Assistant's current normalized dashboard configuration.\n\n" +
+        "Comments, blank lines, quoting, and formatting previously removed by Home Assistant cannot be recovered.\n\n" +
+        "This does not deploy anything to Home Assistant.\n\n" +
         "Continue?"
     );
   }
@@ -1907,9 +2186,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <dt>Source status</dt>
           <dd id="source-status-value" class="${statusClass.trim()}">${this._escapeHtml(sourceStatus)}</dd>
         </dl>
+        ${this._renderSourceMessage()}
         ${this._renderSourceDocumentBody()}
       </section>
     `;
+  }
+
+  _renderSourceMessage() {
+    return this._sourceMessage
+      ? `<p class="state">${this._escapeHtml(this._sourceMessage)}</p>`
+      : "";
   }
 
   _renderSourceDocumentBody() {
@@ -1932,31 +2218,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     if (this._sourceStatus === "No document") {
-      return `
-        <div class="source-actions">
-          <p class="state">No source document exists for this dashboard.</p>
-          <button type="button" id="create-source-document">
-            Create Source Document
-          </button>
-        </div>
-      `;
+      return `<p class="state">No source document exists for this dashboard.</p>`;
     }
-
-    const saveDisabled =
-      this._sourceStatus === "Saving" || !this._hasUnsavedSourceChanges()
-        ? "disabled"
-        : "";
-    const validateDisabled =
-      this._validationStatus === "Validating" ? "disabled" : "";
-    const deployDisabled =
-      !this._sourceDocument ||
-      !this._selectedDashboard ||
-      this._hasUnsavedSourceChanges() ||
-      this._isDeploymentInProgress() ||
-      this._isResolutionInProgress() ||
-      this._sourceText.length === 0
-        ? "disabled"
-        : "";
 
     return `
       <div class="source-editor">
@@ -1967,20 +2230,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           configuration. Validate checks the current editor text and does not
           save or deploy it.
         </p>
+        ${
+          this._isSavedSourceBlank()
+            ? `<p class="state">This Source Document is empty. Enter YAML manually or use Initialize from HA to start from Home Assistant's current dashboard configuration.</p>`
+            : ""
+        }
         <div class="source-code-editor-shell">
           <div id="source-code-editor-host"></div>
           <div id="source-editor-status" class="source-editor-status"></div>
-        </div>
-        <div class="source-actions">
-          <button type="button" id="save-source-document" ${saveDisabled}>
-            Save Source
-          </button>
-          <button type="button" id="validate-source-document" ${validateDisabled}>
-            Validate
-          </button>
-          <button type="button" id="deploy-saved-source" ${deployDisabled}>
-            Deploy Saved Source
-          </button>
         </div>
       </div>
     `;
@@ -2202,34 +2459,25 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _renderCompareSection() {
     const statusClass = this._compareStatus === "Error" ? " error" : "";
-    const compareDisabled =
-      !this._sourceDocument ||
-      !this._selectedDashboard ||
-      this._compareStatus === "Loading" ||
-      this._hasUnsavedSourceChanges() ||
-      this._isDeploymentInProgress()
-        ? "disabled"
-        : "";
+    const baseline = this._sourceDocument?.deployment_baseline ?? null;
+    const baselineOrigin = baseline?.origin ?? null;
 
     return `
       <section class="section">
-        <div class="section-header">
-          <h2>Comparison</h2>
-          <button type="button" id="compare-source-ha" ${compareDisabled}>
-            Compare Source vs HA
-          </button>
-        </div>
+        <h2>Comparison</h2>
         <dl class="compare-status">
           <dt>Status</dt>
           <dd id="compare-status-value" class="${statusClass.trim()}">${this._escapeHtml(
             this._compareStatus
           )}</dd>
-          <dt>Last deployed snapshot</dt>
+          <dt>Baseline snapshot</dt>
           <dd>${this._escapeHtml(
-            this._sourceDocument?.deployment_baseline?.deployed_canonical_json
+            baseline?.deployed_canonical_json
               ? "Available"
               : "Unavailable"
           )}</dd>
+          <dt>Baseline origin</dt>
+          <dd>${this._escapeHtml(this._formatBaselineOrigin(baselineOrigin))}</dd>
         </dl>
         <div id="compare-body">${this._renderCompareBody()}</div>
       </section>
@@ -2276,17 +2524,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           Array reordering may appear as multiple indexed changes.
         </p>
         ${this._renderDiffGroup(
-          "Changes in Saved Source since last deployment",
-          "Last deployed -> Saved Source",
+          "Changes in Saved Source since baseline",
+          "Baseline -> Saved Source",
           this._compareResult.sourceChanges,
-          "Last deployed",
+          "Baseline",
           "Saved Source"
         )}
         ${this._renderDiffGroup(
-          "Changes in Home Assistant since last deployment",
-          "Last deployed -> Current Home Assistant",
+          "Changes in Home Assistant since baseline",
+          "Baseline -> Current Home Assistant",
           this._compareResult.haChanges,
-          "Last deployed",
+          "Baseline",
           "Current HA"
         )}
         ${this._renderDiffGroup(
@@ -2301,7 +2549,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     return `
       <p class="state">
-        Last deployed configuration snapshot is unavailable for this baseline.
+        Baseline configuration snapshot is unavailable.
         Showing current Source vs Home Assistant only.
       </p>
       <p class="state">
@@ -2430,6 +2678,245 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     return formatDiffKindForLabels(kind, { sourceLabel, haLabel });
   }
 
+  _setInspectorTab(tab) {
+    if (!["status", "details", "actions"].includes(tab)) {
+      return;
+    }
+
+    this._inspectorTab = tab;
+    this._inspectorOpen = true;
+    this._render();
+  }
+
+  _toggleInspector() {
+    this._inspectorUserToggled = true;
+    this._inspectorOpen = !this._inspectorOpen;
+    this._render();
+  }
+
+  _renderApplicationHeader() {
+    const integrationVersion = this._status?.integration_version ?? "Unknown";
+
+    return `
+      <header class="app-header">
+        <div class="app-title-block">
+          <h1>HA YAML Source Editor</h1>
+          <span class="app-version">v${this._escapeHtml(integrationVersion)}</span>
+        </div>
+      </header>
+    `;
+  }
+
+  _renderEditorContext() {
+    const dashboard = this._selectedDashboard;
+    const dashboardTitle = dashboard
+      ? this._dashboardTitle(dashboard)
+      : "No dashboard selected";
+    const dashboardPath = dashboard ? this._dashboardPath(dashboard) : "";
+
+    return `
+      <div class="editor-context">
+        <div class="editor-target">
+          <span>${this._escapeHtml(dashboardTitle)}</span>
+          ${
+            dashboardPath
+              ? `<span class="editor-target-path">${this._escapeHtml(dashboardPath)}</span>`
+              : ""
+          }
+        </div>
+        <div class="editor-state-summary" aria-label="Current source and synchronization state">
+          <span id="editor-source-status-value">${this._escapeHtml(
+            `Source: ${this._sourceStateLabel()}`
+          )}</span>
+          <span id="editor-sync-status-value">${this._escapeHtml(
+            `Source vs HA: ${this._sourceVsHa}`
+          )}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  _renderCommandBar() {
+    const saveDisabled =
+      !this._sourceDocument ||
+      this._sourceStatus === "Saving" ||
+      !this._hasUnsavedSourceChanges()
+        ? "disabled"
+        : "";
+    const validateDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._validationStatus === "Validating"
+        ? "disabled"
+        : "";
+    const compareDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._compareStatus === "Loading" ||
+      this._hasUnsavedSourceChanges() ||
+      this._isDeploymentInProgress() ||
+      this._isResolutionInProgress()
+        ? "disabled"
+        : "";
+    const deployDisabled =
+      !this._sourceDocument ||
+      !this._selectedDashboard ||
+      this._hasUnsavedSourceChanges() ||
+      this._isDeploymentInProgress() ||
+      this._isResolutionInProgress() ||
+      this._sourceText.length === 0
+        ? "disabled"
+        : "";
+    const createDisabled = this._canCreateSourceDocument() ? "" : "disabled";
+    const initializeDisabled = this._canInitializeSourceFromHa()
+      ? ""
+      : "disabled";
+
+    return `
+      <nav class="command-bar" aria-label="Source workflow commands">
+        <div class="workflow-actions" aria-label="Source workflow">
+          <button type="button" id="create-source-document" ${createDisabled}>
+            Create Source
+          </button>
+          <button type="button" id="initialize-source-from-ha" ${initializeDisabled}>
+            Initialize from HA
+          </button>
+          <button type="button" id="save-source-document" ${saveDisabled}>
+            Save Source
+          </button>
+          <button type="button" id="validate-source-document" ${validateDisabled}>
+            Validate
+          </button>
+          <button type="button" id="compare-source-ha" ${compareDisabled}>
+            Compare
+          </button>
+          <button type="button" id="deploy-saved-source" ${deployDisabled}>
+            Deploy
+          </button>
+        </div>
+      </nav>
+    `;
+  }
+
+  _renderInspectorEdgeTab() {
+    const inspectorPressed = this._inspectorOpen ? "true" : "false";
+
+    return `
+      <button
+        type="button"
+        id="toggle-inspector"
+        class="inspector-edge-tab"
+        aria-label="${this._inspectorOpen ? "Close Inspector" : "Open Inspector"}"
+        aria-controls="workspace-inspector"
+        aria-expanded="${inspectorPressed}"
+        aria-pressed="${inspectorPressed}"
+      >
+        <span class="inspector-edge-arrow" aria-hidden="true">
+          ${this._inspectorOpen ? ">" : "<"}
+        </span>
+        <span class="inspector-edge-label">Inspector</span>
+      </button>
+    `;
+  }
+
+  _renderInspectorTabs() {
+    const statusSelected = this._inspectorTab === "status";
+    const detailsSelected = this._inspectorTab === "details";
+    const actionsSelected = this._inspectorTab === "actions";
+
+    return `
+      <div class="inspector-tabs" role="tablist" aria-label="Inspector sections">
+        <button
+          type="button"
+          class="inspector-tab${statusSelected ? " selected" : ""}"
+          data-inspector-tab="status"
+          role="tab"
+          aria-selected="${statusSelected ? "true" : "false"}"
+        >
+          Status
+        </button>
+        <button
+          type="button"
+          class="inspector-tab${detailsSelected ? " selected" : ""}"
+          data-inspector-tab="details"
+          role="tab"
+          aria-selected="${detailsSelected ? "true" : "false"}"
+        >
+          Details
+        </button>
+        <button
+          type="button"
+          class="inspector-tab${actionsSelected ? " selected" : ""}"
+          data-inspector-tab="actions"
+          role="tab"
+          aria-selected="${actionsSelected ? "true" : "false"}"
+        >
+          Actions
+        </button>
+      </div>
+    `;
+  }
+
+  _renderInspectorStatusPanel() {
+    const sourceClass = this._sourceStatus === "Error" ? " error" : "";
+    const validationClass =
+      this._validationStatus === "Invalid" || this._validationStatus === "Error"
+        ? " error"
+        : "";
+    const syncClass = this._syncStatus === "SYNC ERROR" ? " error" : "";
+    const deploymentClass =
+      this._deploymentStatus === DEPLOYMENT_OPERATION.ERROR ||
+      this._deploymentStatus === DEPLOYMENT_OPERATION.CONFLICT
+        ? " error"
+        : "";
+
+    return `
+      <section class="section first-section">
+        <h2>Status</h2>
+        <dl class="inspector-summary">
+          <dt>Source</dt>
+          <dd class="${sourceClass.trim()}">${this._escapeHtml(
+            this._sourceStateLabel()
+          )}</dd>
+          <dt>Validation</dt>
+          <dd class="${validationClass.trim()}">${this._escapeHtml(
+            this._validationStatus
+          )}</dd>
+          <dt>Sync</dt>
+          <dd class="${syncClass.trim()}">${this._escapeHtml(this._syncStatus)}</dd>
+          <dt>Source vs HA</dt>
+          <dd>${this._escapeHtml(this._sourceVsHa)}</dd>
+          <dt>Deployment</dt>
+          <dd class="${deploymentClass.trim()}">${this._escapeHtml(
+            this._deploymentStatus
+          )}</dd>
+        </dl>
+        ${this._renderSyncMessage()}
+        ${this._renderDeploymentMessage()}
+        ${this._renderValidationBody()}
+      </section>
+    `;
+  }
+
+  _renderInspectorPanel() {
+    if (this._inspectorTab === "details") {
+      return `
+        ${this._renderConfigurationSection()}
+        ${this._renderSyncSection()}
+        ${this._renderDeploymentSection()}
+      `;
+    }
+
+    if (this._inspectorTab === "actions") {
+      return `
+        ${this._renderCompareSection()}
+        ${this._renderResolutionSection()}
+      `;
+    }
+
+    return this._renderInspectorStatusPanel();
+  }
+
   _renderUnsupportedList(dashboards) {
     if (
       this._dashboardLoading ||
@@ -2466,15 +2953,82 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderExplorerAlerts() {
+    if (!this._error) {
+      return "";
+    }
+
+    return `<p class="state error">Unable to reach the HA YAML Source Editor backend API.</p>`;
+  }
+
+  _renderExplorerRegion({
+    storageDashboards,
+    unsupportedDashboards,
+    refreshDisabled,
+  }) {
+    return `
+      <aside class="workspace-region explorer-region" aria-label="Explorer">
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Explorer</div>
+            <h2>Dashboards</h2>
+          </div>
+          <button type="button" id="refresh-dashboards" ${refreshDisabled}>
+            Refresh
+          </button>
+        </div>
+        ${this._renderExplorerAlerts()}
+        <section class="section first-section">
+          <h3>Storage Mode</h3>
+          ${this._renderDashboardList(storageDashboards)}
+        </section>
+        ${this._renderUnsupportedList(unsupportedDashboards)}
+      </aside>
+    `;
+  }
+
+  _renderEditorRegion() {
+    return `
+      <main class="workspace-region editor-region" aria-label="Editor">
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Editor</div>
+            <h2>Source YAML</h2>
+          </div>
+        </div>
+        ${this._renderEditorContext()}
+        ${this._renderCommandBar()}
+        ${this._renderSourceDocumentSection()}
+      </main>
+    `;
+  }
+
+  _renderInspectorRegion() {
+    return `
+      <aside
+        id="workspace-inspector"
+        class="workspace-region inspector-region"
+        aria-label="Inspector"
+      >
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Inspector</div>
+            <h2>Context</h2>
+          </div>
+        </div>
+        ${this._renderInspectorTabs()}
+        <div class="inspector-panel" role="tabpanel">
+          ${this._renderInspectorPanel()}
+        </div>
+      </aside>
+    `;
+  }
+
   _render() {
     if (!this.shadowRoot) {
       return;
     }
 
-    const integrationVersion = this._status?.integration_version ?? "Unknown";
-    const homeAssistantVersion =
-      this._status?.home_assistant_version ?? "Unknown";
-    const backendState = this._error ? "Error" : this._status ? "Connected" : "Connecting";
     const storageDashboards = this._dashboards.filter(
       (dashboard) => dashboard.mode === "storage"
     );
@@ -2495,44 +3049,268 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           display: block;
           min-height: 100%;
           box-sizing: border-box;
-          padding: 24px;
+          padding: 16px;
           color: var(--primary-text-color);
           background: var(--primary-background-color);
           font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
         }
 
         .panel {
-          max-width: 720px;
-          margin: 0 auto;
+          display: grid;
+          grid-template-rows: auto minmax(0, 1fr);
+          gap: 8px;
+          position: relative;
+          width: 100%;
+          min-height: calc(100vh - 32px);
+          box-sizing: border-box;
+          container-type: inline-size;
         }
 
         h1 {
-          margin: 0 0 24px;
-          font-size: 28px;
+          margin: 0;
+          font-size: 24px;
           font-weight: 400;
           line-height: 1.2;
         }
 
         h2 {
-          margin: 0 0 16px;
-          font-size: 20px;
+          margin: 0;
+          font-size: 18px;
           font-weight: 400;
           line-height: 1.3;
         }
 
+        h3 {
+          margin: 0 0 12px;
+          font-size: 15px;
+          font-weight: 500;
+          line-height: 1.3;
+        }
+
+        .app-header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          min-width: 0;
+          padding: 0 4px;
+        }
+
+        .app-title-block {
+          display: flex;
+          align-items: baseline;
+          gap: 16px;
+          min-width: 0;
+        }
+
+        .app-version {
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 500;
+        }
+
+        .editor-context {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: space-between;
+          gap: 12px;
+          min-width: 0;
+          margin-bottom: 12px;
+        }
+
+        .editor-target {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
+
+        .editor-target-path {
+          color: var(--secondary-text-color);
+          font-family: var(--code-font-family, monospace);
+          font-size: 12px;
+        }
+
+        .editor-state-summary {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          justify-content: flex-end;
+          gap: 8px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 500;
+        }
+
+        .editor-state-summary span {
+          padding: 4px 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 4px;
+          background: var(--card-background-color);
+        }
+
+        .command-bar {
+          display: flex;
+          align-items: center;
+          justify-content: flex-start;
+          gap: 12px;
+          min-width: 0;
+          padding: 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--card-background-color);
+        }
+
+        .workflow-actions {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+          min-width: 0;
+        }
+
+        .command-bar button {
+          background: var(--primary-background-color);
+        }
+
+        .editor-region .command-bar {
+          margin-bottom: 12px;
+        }
+
+        .workspace-shell {
+          --inspector-width: clamp(260px, 24cqi, 340px);
+          --inspector-overlay-width: min(360px, calc(100% - 24px));
+          display: grid;
+          grid-template-columns: minmax(220px, 260px) minmax(460px, 1fr);
+          gap: 12px;
+          position: relative;
+          min-height: 0;
+        }
+
+        .panel.inspector-open .workspace-shell {
+          grid-template-columns: minmax(220px, 260px) minmax(460px, 1fr) var(--inspector-width);
+        }
+
+        .workspace-region {
+          min-width: 0;
+          min-height: 0;
+          padding: 16px;
+          box-sizing: border-box;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--card-background-color);
+          overflow: auto;
+        }
+
+        .editor-region {
+          display: flex;
+          flex-direction: column;
+          background: var(--primary-background-color);
+          border-color: var(--divider-color);
+        }
+
+        .inspector-region {
+          display: none;
+        }
+
+        .panel.inspector-open .inspector-region {
+          display: block;
+        }
+
+        .inspector-edge-tab {
+          position: absolute;
+          top: 50%;
+          right: 0;
+          z-index: 3;
+          width: 32px;
+          min-width: 32px;
+          min-height: 128px;
+          padding: 12px 4px;
+          border: 1px solid var(--divider-color);
+          border-right: 0;
+          border-radius: 6px 0 0 6px;
+          color: var(--primary-text-color);
+          background: var(--card-background-color);
+          box-shadow: var(--ha-card-box-shadow, none);
+          font-size: 12px;
+          font-weight: 500;
+          letter-spacing: 0;
+          transform: translateY(-50%);
+          transition: right 160ms ease;
+        }
+
+        .panel.inspector-open .inspector-edge-tab {
+          right: var(--inspector-width);
+        }
+
+        .inspector-edge-label {
+          writing-mode: vertical-rl;
+        }
+
+        .inspector-edge-arrow {
+          margin-bottom: 8px;
+          font-size: 14px;
+          line-height: 1;
+        }
+
+        .inspector-edge-tab:hover {
+          background: var(--secondary-background-color);
+        }
+
+        .inspector-edge-tab:focus-visible {
+          outline: 2px solid var(--primary-color);
+          outline-offset: 2px;
+        }
+
+        .region-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 16px;
+        }
+
+        .region-kicker {
+          margin-bottom: 4px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 500;
+          letter-spacing: 0;
+        }
+
         .section {
-          margin-top: 24px;
+          margin-top: 20px;
+        }
+
+        .section > h2,
+        .section > h3 {
+          margin-bottom: 12px;
+        }
+
+        .first-section,
+        .editor-region > .section,
+        .inspector-region > .section:first-of-type {
+          margin-top: 0;
+        }
+
+        .editor-region > .section {
+          display: flex;
+          flex: 1;
+          flex-direction: column;
+          min-height: 0;
         }
 
         dl {
           display: grid;
           grid-template-columns: max-content minmax(0, 1fr);
-          gap: 12px 20px;
+          gap: 10px 16px;
           margin: 0;
-          padding: 20px;
+          padding: 14px;
           border-radius: 8px;
-          background: var(--card-background-color);
-          box-shadow: var(--ha-card-box-shadow, none);
+          background: var(--primary-background-color);
           border: 1px solid var(--divider-color);
         }
 
@@ -2551,10 +3329,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           align-items: center;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 16px;
+          margin-bottom: 12px;
         }
 
-        .section-header h2 {
+        .section-header h2,
+        .section-header h3 {
           margin: 0;
         }
 
@@ -2580,7 +3359,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .dashboard-list {
           display: grid;
-          gap: 12px;
+          gap: 8px;
           margin: 0;
           padding: 0;
           list-style: none;
@@ -2598,7 +3377,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           display: block;
           width: 100%;
           min-height: 0;
-          padding: 16px;
+          padding: 12px;
           border: 0;
           border-radius: 0;
           color: var(--primary-text-color);
@@ -2616,7 +3395,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
 
         .unsupported-card {
-          padding: 16px;
+          padding: 12px;
         }
 
         .dashboard-title {
@@ -2645,11 +3424,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .state {
           margin: 0;
-          padding: 16px;
+          padding: 12px;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
           color: var(--secondary-text-color);
-          background: var(--card-background-color);
+          background: var(--primary-background-color);
         }
 
         .error {
@@ -2684,9 +3463,76 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin: 16px 0;
         }
 
+        .inspector-tabs {
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 4px;
+          margin-bottom: 16px;
+          padding: 4px;
+          border-radius: 6px;
+          background: var(--primary-background-color);
+          border: 1px solid var(--divider-color);
+        }
+
+        .inspector-tab {
+          min-width: 0;
+          min-height: 32px;
+          padding: 0 8px;
+          border: 0;
+          background: transparent;
+          font-size: 13px;
+        }
+
+        .inspector-tab.selected {
+          background: var(--card-background-color);
+          box-shadow: inset 0 -2px 0 var(--primary-color);
+        }
+
+        .inspector-panel {
+          display: grid;
+          gap: 16px;
+        }
+
+        .inspector-summary {
+          margin-bottom: 12px;
+        }
+
         .config-viewer {
           display: grid;
           gap: 12px;
+        }
+
+        .editor-region .source-editor {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .editor-region .source-editor,
+        .editor-region .source-code-editor-shell {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .editor-region .source-code-editor-shell {
+          flex: 1;
+          min-height: 460px;
+        }
+
+        .editor-region #source-code-editor-host {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .editor-region .cm-editor {
+          height: 100%;
+          min-height: 460px;
+        }
+
+        .editor-region .cm-scroller {
+          height: 100%;
+          max-height: none;
+          min-height: 0;
+          resize: none;
         }
 
         .source-editor,
@@ -2774,7 +3620,6 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           border: 1px solid var(--divider-color);
           overflow: hidden;
           background: var(--code-editor-background-color, var(--card-background-color));
-          box-shadow: var(--ha-card-box-shadow, none);
         }
 
         #source-code-editor-host {
@@ -2793,13 +3638,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         pre {
           margin: 0;
-          padding: 16px;
-          max-height: 520px;
+          padding: 12px;
+          max-height: 360px;
           overflow: auto;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
           color: var(--primary-text-color);
-          background: var(--card-background-color);
+          background: var(--primary-background-color);
           font-family: var(--code-font-family, monospace);
           font-size: 13px;
           line-height: 1.5;
@@ -2807,9 +3652,177 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           overflow-wrap: anywhere;
         }
 
-        @media (max-width: 600px) {
+        @container (max-width: 1100px) {
+          .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .panel.inspector-open .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .inspector-region {
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2;
+            width: var(--inspector-overlay-width);
+            box-shadow: var(--ha-card-box-shadow, none);
+          }
+
+          .panel.inspector-open .inspector-region {
+            display: block;
+          }
+
+          .panel.inspector-open .inspector-edge-tab {
+            right: var(--inspector-overlay-width);
+          }
+        }
+
+        @container (max-width: 760px) {
+          .panel {
+            min-height: auto;
+          }
+
+          .workspace-shell {
+            display: grid;
+            grid-template-columns: 1fr;
+          }
+
+          .panel.inspector-open .workspace-shell {
+            grid-template-columns: 1fr;
+          }
+
+          .editor-region {
+            order: 1;
+          }
+
+          .explorer-region {
+            order: 2;
+          }
+
+          .inspector-region {
+            order: 3;
+          }
+
+          .workspace-region {
+            overflow: visible;
+          }
+
+          .editor-region .source-code-editor-shell,
+          .editor-region .cm-editor {
+            min-height: 360px;
+          }
+
+          .editor-region .cm-scroller {
+            max-height: 70vh;
+            resize: vertical;
+          }
+
+          dl {
+            grid-template-columns: 1fr;
+            gap: 4px;
+          }
+
+          dd {
+            margin-bottom: 12px;
+          }
+
+          dd:last-child {
+            margin-bottom: 0;
+          }
+
+          .section-header {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+        }
+
+        @media (max-width: 1100px) {
+          .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .panel.inspector-open .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .inspector-region {
+            position: absolute;
+            top: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 2;
+            width: var(--inspector-overlay-width);
+            box-shadow: var(--ha-card-box-shadow, none);
+          }
+
+          .panel.inspector-open .inspector-region {
+            display: block;
+          }
+
+          .panel.inspector-open .inspector-edge-tab {
+            right: var(--inspector-overlay-width);
+          }
+        }
+
+        @media (max-width: 760px) {
           :host {
             padding: 16px;
+          }
+
+          .panel {
+            min-height: auto;
+          }
+
+          .workspace-shell {
+            display: grid;
+            grid-template-columns: 1fr;
+          }
+
+          .panel.inspector-open .workspace-shell {
+            grid-template-columns: 1fr;
+          }
+
+          .app-header,
+          .app-title-block,
+          .editor-context,
+          .command-bar {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+
+          .editor-state-summary,
+          .workflow-actions {
+            justify-content: flex-start;
+            margin-left: 0;
+          }
+
+          .editor-region {
+            order: 1;
+          }
+
+          .explorer-region {
+            order: 2;
+          }
+
+          .inspector-region {
+            order: 3;
+          }
+
+          .workspace-region {
+            overflow: visible;
+          }
+
+          .editor-region .source-code-editor-shell,
+          .editor-region .cm-editor {
+            min-height: 360px;
+          }
+
+          .editor-region .cm-scroller {
+            max-height: 70vh;
+            resize: vertical;
           }
 
           dl {
@@ -2831,43 +3844,34 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           }
         }
       </style>
-      <section class="panel">
-        <h1>HA YAML Source Editor</h1>
-        <dl>
-          <dt>Integration</dt>
-          <dd>Loaded</dd>
-          <dt>Backend API</dt>
-          <dd>${backendState}</dd>
-          <dt>Dashboard API</dt>
-          <dd>${this._dashboardStatus}</dd>
-          <dt>Home Assistant</dt>
-          <dd>${homeAssistantVersion}</dd>
-          <dt>Integration version</dt>
-          <dd>${integrationVersion}</dd>
-        </dl>
-        <section class="section">
-          <div class="section-header">
-            <h2>Storage Mode dashboards</h2>
-            <button type="button" id="refresh-dashboards" ${refreshDisabled}>
-              Refresh
-            </button>
-          </div>
-          ${this._renderDashboardList(storageDashboards)}
-        </section>
-        ${this._renderUnsupportedList(unsupportedDashboards)}
-        ${this._renderConfigurationSection()}
-        ${this._renderSourceDocumentSection()}
-        ${this._renderValidationSection()}
-        ${this._renderDeploymentSection()}
-        ${this._renderSyncSection()}
-        ${this._renderCompareSection()}
-        ${this._renderResolutionSection()}
+      <section class="panel${this._inspectorOpen ? " inspector-open" : ""}">
+        ${this._renderApplicationHeader()}
+        <div class="workspace-shell">
+          ${this._renderExplorerRegion({
+            storageDashboards,
+            unsupportedDashboards,
+            refreshDisabled,
+          })}
+          ${this._renderEditorRegion()}
+          ${this._renderInspectorRegion()}
+          ${this._renderInspectorEdgeTab()}
+        </div>
       </section>
     `;
 
     this.shadowRoot
       .getElementById("refresh-dashboards")
       ?.addEventListener("click", () => this._refreshDashboards());
+
+    this.shadowRoot
+      .getElementById("toggle-inspector")
+      ?.addEventListener("click", () => this._toggleInspector());
+
+    for (const tab of this.shadowRoot.querySelectorAll(".inspector-tab")) {
+      tab.addEventListener("click", () => {
+        this._setInspectorTab(tab.dataset.inspectorTab);
+      });
+    }
 
     for (const button of this.shadowRoot.querySelectorAll(".dashboard-card")) {
       button.addEventListener("click", () => {
@@ -2884,6 +3888,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this.shadowRoot
       .getElementById("create-source-document")
       ?.addEventListener("click", () => this._createSourceDocument());
+
+    this.shadowRoot
+      .getElementById("initialize-source-from-ha")
+      ?.addEventListener("click", () => this._initializeSourceFromHa());
 
     this.shadowRoot
       .getElementById("save-source-document")
@@ -2920,6 +3928,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     if (configBlock && this._configStatus === "Loaded") {
       configBlock.textContent = JSON.stringify(this._config, null, 2);
     }
+
+    this._syncInspectorResizeObserver();
   }
 }
 
