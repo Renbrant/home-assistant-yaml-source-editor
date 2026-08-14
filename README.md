@@ -18,6 +18,24 @@ Home Assistant's supported Lovelace WebSocket API.
 
 ![HA YAML Source Editor workspace](Photos/Screenshots/workspace.png)
 
+## Table of Contents
+
+- [Why This Exists](#why-this-exists)
+- [Workspace](#workspace)
+- [Workflow](#workflow)
+- [Features](#features)
+- [Supported Targets](#supported-targets)
+- [Installation](#installation)
+- [Your First Source Document](#your-first-source-document)
+- [Synchronization States](#synchronization-states)
+- [Baselines](#baselines)
+- [Conflict Resolution](#conflict-resolution)
+- [Data and Storage](#data-and-storage)
+- [Security](#security)
+- [Known Limitations](#known-limitations)
+- [Troubleshooting](#troubleshooting)
+- [License](#license)
+
 ## Why This Exists
 
 Home Assistant is very good at managing configuration as structured data. That is also
