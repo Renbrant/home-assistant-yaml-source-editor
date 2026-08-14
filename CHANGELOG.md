@@ -1,5 +1,39 @@
 # Changelog
 
+## [0.2.0] - 2026-08-13
+
+Workspace UX and Source bootstrap release.
+
+### Added / Improved
+
+- New Explorer | Editor | Inspector workspace architecture.
+- YAML editor remains the primary workspace.
+- Responsive Inspector with vertical edge control.
+- Inspector defaults open on wide layouts and closed on narrower layouts.
+- Manual Inspector choice is preserved after user interaction.
+- Editor-scoped Source workflow toolbar.
+- Create Source action for dashboards without a Source Document.
+- Initialize from HA action for an existing but empty Source Document.
+- Initialize from HA reads current Home Assistant configuration and populates
+  the existing Source Document without deploying anything to HA.
+- Explorer simplified to focus on dashboard navigation.
+- Active dashboard/path and Source synchronization context moved into the
+  Editor header.
+- Clearer baseline terminology distinguishing Deployment from Imported from
+  Home Assistant.
+- Conflict-resolution presentation remains separate from Source initialization.
+
+### Safety
+
+- Source YAML remains raw/lossless.
+- No automatic formatting or parse/dump normalization was introduced.
+- Initialize from HA is explicitly lossy only with respect to formatting and
+  comments already removed by Home Assistant.
+- Deploy still uses saved Source only.
+- Existing validation, Compare, conflict detection, deployment verification, and
+  baseline safety remain authoritative.
+- No direct `.storage` writes were introduced.
+
 ## [0.1.1] - 2026-08-13
 
 Professional YAML editor UX release.
