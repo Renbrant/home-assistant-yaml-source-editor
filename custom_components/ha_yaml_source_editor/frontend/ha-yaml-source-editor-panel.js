@@ -22,7 +22,10 @@ import {
   haConfigToSourceYaml,
   utf8Length,
 } from "./ha-import.mjs";
-import { createSourceCodeEditor } from "./source-code-editor.mjs";
+import {
+  createSourceCodeEditor,
+  shouldRestoreEditorViewportSnapshot,
+} from "./source-code-editor.mjs";
 import {
   assessFinalOverwriteRead,
   assessOverwritePreflight,
@@ -3029,6 +3032,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       return;
     }
 
+    const editorViewportSnapshot =
+      this._sourceEditor && this._sourceEditorDocumentId
+        ? {
+            editor: this._sourceEditor,
+            documentId: this._sourceEditorDocumentId,
+            effect: this._sourceEditor.captureViewportSnapshot(),
+          }
+        : null;
+
     const storageDashboards = this._dashboards.filter(
       (dashboard) => dashboard.mode === "storage"
     );
@@ -3922,6 +3934,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       ?.addEventListener("click", () => this._overwriteHaWithSavedSource());
 
     this._attachSourceEditor();
+    if (
+      shouldRestoreEditorViewportSnapshot(editorViewportSnapshot, {
+        editor: this._sourceEditor,
+        documentId: this._sourceEditorDocumentId,
+      })
+    ) {
+      this._sourceEditor.restoreViewportSnapshot(
+        editorViewportSnapshot.effect
+      );
+    }
     this._refreshSourceEditorStatusBar();
 
     const configBlock = this.shadowRoot.getElementById("dashboard-config-json");

@@ -6,6 +6,7 @@ import {
   editorTextFromDocument,
   handleSourceEditorKeydown,
   shouldNotifyEditorChange,
+  shouldRestoreEditorViewportSnapshot,
   stopHostKeydownPropagation,
 } from "../custom_components/ha_yaml_source_editor/frontend/source-code-editor.mjs";
 
@@ -121,4 +122,44 @@ test("editor keydown handler uses CodeMirror event-view argument order", () => {
   assert.equal(handleSourceEditorKeydown(event, view), false);
   assert.equal(stopped, true);
   assert.equal(viewStopCalled, false);
+});
+
+test("editor viewport snapshot restores only for the same editor and document", () => {
+  const editor = {};
+  const replacementEditor = {};
+  const effect = {};
+  const snapshot = {
+    editor,
+    documentId: "source-document-1",
+    effect,
+  };
+
+  assert.equal(
+    shouldRestoreEditorViewportSnapshot(snapshot, {
+      editor,
+      documentId: "source-document-1",
+    }),
+    true
+  );
+  assert.equal(
+    shouldRestoreEditorViewportSnapshot(snapshot, {
+      editor,
+      documentId: "source-document-2",
+    }),
+    false
+  );
+  assert.equal(
+    shouldRestoreEditorViewportSnapshot(snapshot, {
+      editor: replacementEditor,
+      documentId: "source-document-1",
+    }),
+    false
+  );
+  assert.equal(
+    shouldRestoreEditorViewportSnapshot(null, {
+      editor,
+      documentId: "source-document-1",
+    }),
+    false
+  );
 });
