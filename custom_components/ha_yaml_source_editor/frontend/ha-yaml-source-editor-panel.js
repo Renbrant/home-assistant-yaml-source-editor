@@ -2466,15 +2466,97 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderWorkspaceStatus({
+    backendState,
+    homeAssistantVersion,
+    integrationVersion,
+  }) {
+    return `
+      <dl class="workspace-status">
+        <dt>Integration</dt>
+        <dd>Loaded</dd>
+        <dt>Backend API</dt>
+        <dd>${backendState}</dd>
+        <dt>Dashboard API</dt>
+        <dd>${this._dashboardStatus}</dd>
+        <dt>Home Assistant</dt>
+        <dd>${homeAssistantVersion}</dd>
+        <dt>Integration version</dt>
+        <dd>${integrationVersion}</dd>
+      </dl>
+    `;
+  }
+
+  _renderExplorerRegion({
+    storageDashboards,
+    unsupportedDashboards,
+    refreshDisabled,
+  }) {
+    return `
+      <aside class="workspace-region explorer-region" aria-label="Explorer">
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Explorer</div>
+            <h2>Dashboards</h2>
+          </div>
+          <button type="button" id="refresh-dashboards" ${refreshDisabled}>
+            Refresh
+          </button>
+        </div>
+        ${this._renderWorkspaceStatus({
+          backendState: this._error ? "Error" : this._status ? "Connected" : "Connecting",
+          homeAssistantVersion:
+            this._status?.home_assistant_version ?? "Unknown",
+          integrationVersion:
+            this._status?.integration_version ?? "Unknown",
+        })}
+        <section class="section first-section">
+          <h3>Storage Mode</h3>
+          ${this._renderDashboardList(storageDashboards)}
+        </section>
+        ${this._renderUnsupportedList(unsupportedDashboards)}
+      </aside>
+    `;
+  }
+
+  _renderEditorRegion() {
+    return `
+      <main class="workspace-region editor-region" aria-label="Editor">
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Editor</div>
+            <h2>Source YAML</h2>
+          </div>
+        </div>
+        ${this._renderSourceDocumentSection()}
+      </main>
+    `;
+  }
+
+  _renderInspectorRegion() {
+    return `
+      <aside class="workspace-region inspector-region" aria-label="Inspector">
+        <div class="region-header">
+          <div>
+            <div class="region-kicker">Inspector</div>
+            <h2>Status & workflow</h2>
+          </div>
+        </div>
+        ${this._renderConfigurationSection()}
+        ${this._renderValidationSection()}
+        ${this._renderDeploymentSection()}
+        ${this._renderSyncSection()}
+        ${this._renderCompareSection()}
+        ${this._renderResolutionSection()}
+      </aside>
+    `;
+  }
+
   _render() {
     if (!this.shadowRoot) {
       return;
     }
 
-    const integrationVersion = this._status?.integration_version ?? "Unknown";
-    const homeAssistantVersion =
-      this._status?.home_assistant_version ?? "Unknown";
-    const backendState = this._error ? "Error" : this._status ? "Connected" : "Connecting";
     const storageDashboards = this._dashboards.filter(
       (dashboard) => dashboard.mode === "storage"
     );
@@ -2495,44 +2577,114 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           display: block;
           min-height: 100%;
           box-sizing: border-box;
-          padding: 24px;
+          padding: 16px;
           color: var(--primary-text-color);
           background: var(--primary-background-color);
           font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif);
         }
 
         .panel {
-          max-width: 720px;
-          margin: 0 auto;
+          display: grid;
+          grid-template-rows: auto minmax(0, 1fr);
+          gap: 12px;
+          width: 100%;
+          min-height: calc(100vh - 32px);
+          box-sizing: border-box;
+          container-type: inline-size;
         }
 
         h1 {
-          margin: 0 0 24px;
-          font-size: 28px;
+          margin: 0;
+          font-size: 24px;
           font-weight: 400;
           line-height: 1.2;
         }
 
         h2 {
-          margin: 0 0 16px;
-          font-size: 20px;
+          margin: 0;
+          font-size: 18px;
           font-weight: 400;
           line-height: 1.3;
         }
 
+        h3 {
+          margin: 0 0 12px;
+          font-size: 15px;
+          font-weight: 500;
+          line-height: 1.3;
+        }
+
+        .workspace-shell {
+          display: grid;
+          grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr) minmax(280px, 360px);
+          gap: 12px;
+          min-height: 0;
+        }
+
+        .workspace-region {
+          min-width: 0;
+          min-height: 0;
+          padding: 16px;
+          box-sizing: border-box;
+          border: 1px solid var(--divider-color);
+          border-radius: 8px;
+          background: var(--card-background-color);
+          box-shadow: var(--ha-card-box-shadow, none);
+          overflow: auto;
+        }
+
+        .editor-region {
+          display: flex;
+          flex-direction: column;
+          background: var(--primary-background-color);
+        }
+
+        .region-header {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+          margin-bottom: 16px;
+        }
+
+        .region-kicker {
+          margin-bottom: 4px;
+          color: var(--secondary-text-color);
+          font-size: 12px;
+          font-weight: 500;
+          letter-spacing: 0;
+        }
+
         .section {
-          margin-top: 24px;
+          margin-top: 20px;
+        }
+
+        .section > h2,
+        .section > h3 {
+          margin-bottom: 12px;
+        }
+
+        .first-section,
+        .editor-region > .section,
+        .inspector-region > .section:first-of-type {
+          margin-top: 0;
+        }
+
+        .editor-region > .section {
+          display: flex;
+          flex: 1;
+          flex-direction: column;
+          min-height: 0;
         }
 
         dl {
           display: grid;
           grid-template-columns: max-content minmax(0, 1fr);
-          gap: 12px 20px;
+          gap: 10px 16px;
           margin: 0;
-          padding: 20px;
+          padding: 14px;
           border-radius: 8px;
-          background: var(--card-background-color);
-          box-shadow: var(--ha-card-box-shadow, none);
+          background: var(--primary-background-color);
           border: 1px solid var(--divider-color);
         }
 
@@ -2551,10 +2703,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           align-items: center;
           justify-content: space-between;
           gap: 16px;
-          margin-bottom: 16px;
+          margin-bottom: 12px;
         }
 
-        .section-header h2 {
+        .section-header h2,
+        .section-header h3 {
           margin: 0;
         }
 
@@ -2580,7 +2733,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .dashboard-list {
           display: grid;
-          gap: 12px;
+          gap: 8px;
           margin: 0;
           padding: 0;
           list-style: none;
@@ -2598,7 +2751,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           display: block;
           width: 100%;
           min-height: 0;
-          padding: 16px;
+          padding: 12px;
           border: 0;
           border-radius: 0;
           color: var(--primary-text-color);
@@ -2616,7 +2769,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
 
         .unsupported-card {
-          padding: 16px;
+          padding: 12px;
         }
 
         .dashboard-title {
@@ -2645,11 +2798,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         .state {
           margin: 0;
-          padding: 16px;
+          padding: 12px;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
           color: var(--secondary-text-color);
-          background: var(--card-background-color);
+          background: var(--primary-background-color);
         }
 
         .error {
@@ -2684,9 +2837,46 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           margin: 16px 0;
         }
 
+        .workspace-status {
+          margin-bottom: 16px;
+        }
+
         .config-viewer {
           display: grid;
           gap: 12px;
+        }
+
+        .editor-region .source-editor {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .editor-region .source-editor,
+        .editor-region .source-code-editor-shell {
+          display: flex;
+          flex-direction: column;
+        }
+
+        .editor-region .source-code-editor-shell {
+          flex: 1;
+          min-height: 460px;
+        }
+
+        .editor-region #source-code-editor-host {
+          flex: 1;
+          min-height: 0;
+        }
+
+        .editor-region .cm-editor {
+          height: 100%;
+          min-height: 460px;
+        }
+
+        .editor-region .cm-scroller {
+          height: 100%;
+          max-height: none;
+          min-height: 0;
+          resize: none;
         }
 
         .source-editor,
@@ -2774,7 +2964,6 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           border: 1px solid var(--divider-color);
           overflow: hidden;
           background: var(--code-editor-background-color, var(--card-background-color));
-          box-shadow: var(--ha-card-box-shadow, none);
         }
 
         #source-code-editor-host {
@@ -2793,13 +2982,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
         pre {
           margin: 0;
-          padding: 16px;
-          max-height: 520px;
+          padding: 12px;
+          max-height: 360px;
           overflow: auto;
           border-radius: 8px;
           border: 1px solid var(--divider-color);
           color: var(--primary-text-color);
-          background: var(--card-background-color);
+          background: var(--primary-background-color);
           font-family: var(--code-font-family, monospace);
           font-size: 13px;
           line-height: 1.5;
@@ -2807,9 +2996,97 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           overflow-wrap: anywhere;
         }
 
-        @media (max-width: 600px) {
+        @container (max-width: 1100px) {
+          .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .inspector-region {
+            grid-column: 1 / -1;
+            max-height: none;
+          }
+        }
+
+        @container (max-width: 760px) {
+          .panel {
+            min-height: auto;
+          }
+
+          .workspace-shell {
+            display: grid;
+            grid-template-columns: 1fr;
+          }
+
+          .workspace-region {
+            overflow: visible;
+          }
+
+          .editor-region .source-code-editor-shell,
+          .editor-region .cm-editor {
+            min-height: 360px;
+          }
+
+          .editor-region .cm-scroller {
+            max-height: 70vh;
+            resize: vertical;
+          }
+
+          dl {
+            grid-template-columns: 1fr;
+            gap: 4px;
+          }
+
+          dd {
+            margin-bottom: 12px;
+          }
+
+          dd:last-child {
+            margin-bottom: 0;
+          }
+
+          .section-header {
+            align-items: flex-start;
+            flex-direction: column;
+          }
+        }
+
+        @media (max-width: 1100px) {
+          .workspace-shell {
+            grid-template-columns: minmax(220px, 280px) minmax(420px, 1fr);
+          }
+
+          .inspector-region {
+            grid-column: 1 / -1;
+            max-height: none;
+          }
+        }
+
+        @media (max-width: 760px) {
           :host {
             padding: 16px;
+          }
+
+          .panel {
+            min-height: auto;
+          }
+
+          .workspace-shell {
+            display: grid;
+            grid-template-columns: 1fr;
+          }
+
+          .workspace-region {
+            overflow: visible;
+          }
+
+          .editor-region .source-code-editor-shell,
+          .editor-region .cm-editor {
+            min-height: 360px;
+          }
+
+          .editor-region .cm-scroller {
+            max-height: 70vh;
+            resize: vertical;
           }
 
           dl {
@@ -2833,35 +3110,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       </style>
       <section class="panel">
         <h1>HA YAML Source Editor</h1>
-        <dl>
-          <dt>Integration</dt>
-          <dd>Loaded</dd>
-          <dt>Backend API</dt>
-          <dd>${backendState}</dd>
-          <dt>Dashboard API</dt>
-          <dd>${this._dashboardStatus}</dd>
-          <dt>Home Assistant</dt>
-          <dd>${homeAssistantVersion}</dd>
-          <dt>Integration version</dt>
-          <dd>${integrationVersion}</dd>
-        </dl>
-        <section class="section">
-          <div class="section-header">
-            <h2>Storage Mode dashboards</h2>
-            <button type="button" id="refresh-dashboards" ${refreshDisabled}>
-              Refresh
-            </button>
-          </div>
-          ${this._renderDashboardList(storageDashboards)}
-        </section>
-        ${this._renderUnsupportedList(unsupportedDashboards)}
-        ${this._renderConfigurationSection()}
-        ${this._renderSourceDocumentSection()}
-        ${this._renderValidationSection()}
-        ${this._renderDeploymentSection()}
-        ${this._renderSyncSection()}
-        ${this._renderCompareSection()}
-        ${this._renderResolutionSection()}
+        <div class="workspace-shell">
+          ${this._renderExplorerRegion({
+            storageDashboards,
+            unsupportedDashboards,
+            refreshDisabled,
+          })}
+          ${this._renderEditorRegion()}
+          ${this._renderInspectorRegion()}
+        </div>
       </section>
     `;
 
