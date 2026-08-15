@@ -133,3 +133,111 @@ test("Template validate WebSocket constant and registration are present", async 
     /async_register_command\(hass, websocket_templates_block_validate\)/,
   );
 });
+
+test("Template save WebSocket is admin-only and enforces prepare validate commit order", async () => {
+  const source = await readFile(websocketPath, "utf8");
+
+  const functionStart = source.indexOf(
+    "async def websocket_templates_block_save("
+  );
+
+  assert.notEqual(
+    functionStart,
+    -1,
+    "Missing Template save WebSocket",
+  );
+
+  const decoratorStart = source.lastIndexOf(
+    "@websocket_api.require_admin",
+    functionStart,
+  );
+
+  assert.notEqual(
+    decoratorStart,
+    -1,
+    "Template save WebSocket must require admin",
+  );
+
+  const nextCommand = source.indexOf(
+    "@websocket_api.require_admin",
+    functionStart + 1,
+  );
+
+  const endpoint = source.slice(
+    decoratorStart,
+    nextCommand === -1 ? source.length : nextCommand,
+  );
+
+  const prepareIndex = endpoint.indexOf(
+    "prepare_template_block_save"
+  );
+
+  const semanticIndex = endpoint.indexOf(
+    "async_validate_prepared_template_save"
+  );
+
+  const commitIndex = endpoint.indexOf(
+    "commit_prepared_template_block_save"
+  );
+
+  assert.ok(
+    prepareIndex !== -1,
+    "Save endpoint must prepare a backend-authoritative candidate",
+  );
+
+  assert.ok(
+    semanticIndex !== -1,
+    "Save endpoint must perform Home Assistant semantic validation",
+  );
+
+  assert.ok(
+    commitIndex !== -1,
+    "Save endpoint must commit only the prepared candidate",
+  );
+
+  assert.ok(
+    prepareIndex < semanticIndex,
+    "Prepare must occur before semantic validation",
+  );
+
+  assert.ok(
+    semanticIndex < commitIndex,
+    "Semantic validation must occur before commit",
+  );
+
+  assert.doesNotMatch(
+    endpoint,
+    /\bsave_template_block\(/,
+    "Remote save must not use the convenience wrapper that skips HA semantic validation",
+  );
+
+  assert.match(
+    endpoint,
+    /template_source_changed/,
+  );
+
+  assert.match(
+    endpoint,
+    /template_semantic_invalid/,
+  );
+
+  assert.match(
+    endpoint,
+    /template_write_error/,
+  );
+});
+
+test("Template save WebSocket constant and registration are present", async () => {
+  const constants = await readFile(constPath, "utf8");
+  const websocket = await readFile(websocketPath, "utf8");
+
+  assert.match(
+    constants,
+    /WS_TYPE_TEMPLATES_BLOCK_SAVE = f"\{DOMAIN\}\/templates\/block\/save"/,
+  );
+
+  assert.match(
+    websocket,
+    /async_register_command\(hass, websocket_templates_block_save\)/,
+  );
+});
