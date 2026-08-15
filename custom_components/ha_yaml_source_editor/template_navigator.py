@@ -200,12 +200,17 @@ def index_template_text(source_text: str) -> list[dict[str, Any]]:
 
     for block_number, (start_index, block_key) in enumerate(starts, start=1):
         if block_number < len(starts):
-            end_index = starts[block_number][0] - 1
+            next_start_index = starts[block_number][0]
+            end_index = _content_end_before_next_block(
+                lines,
+                start_index,
+                next_start_index,
+            )
         else:
-            end_index = len(lines) - 1
-
-        if end_index < start_index:
-            end_index = start_index
+            end_index = _content_end_at_eof(
+                lines,
+                start_index,
+            )
 
         section = _section_before_block(lines, start_index)
 
@@ -247,6 +252,52 @@ def index_template_text(source_text: str) -> list[dict[str, Any]]:
     return blocks
 
 
+def _content_end_before_next_block(
+    lines: list[str],
+    block_start: int,
+    next_block_start: int,
+) -> int:
+    """Return the last line belonging structurally to the current block.
+
+    Blank lines and column-zero comments immediately preceding the next
+    top-level list item are preserved as external raw text. They are not
+    part of either writable block range.
+    """
+    end_index = next_block_start - 1
+
+    while end_index > block_start:
+        line = _without_line_ending(lines[end_index])
+
+        if not line.strip():
+            end_index -= 1
+            continue
+
+        if line.startswith("#"):
+            end_index -= 1
+            continue
+
+        break
+
+    return max(block_start, end_index)
+
+
+def _content_end_at_eof(
+    lines: list[str],
+    block_start: int,
+) -> int:
+    """Trim only trailing blank lines at EOF from a writable block."""
+    end_index = len(lines) - 1
+
+    while end_index > block_start:
+        line = _without_line_ending(lines[end_index])
+
+        if line.strip():
+            break
+
+        end_index -= 1
+
+    return max(block_start, end_index)
+
 def _index_entities(
     lines: list[str],
     block_start: int,
@@ -270,6 +321,18 @@ def _index_entities(
             )
         )
 
+    # A Template entity list is the shallowest "- name:" sequence
+    # inside the top-level block. Deeper "- name:" entries can occur
+    # inside attributes or other nested YAML and are navigation noise,
+    # not independent Template entities.
+    if matches:
+        entity_indent = min(indent for _index, indent, _name in matches)
+        matches = [
+            item
+            for item in matches
+            if item[1] == entity_indent
+        ]
+
     entities: list[dict[str, Any]] = []
 
     for entity_number, (start_index, indent, name) in enumerate(matches, start=1):
@@ -288,21 +351,16 @@ def _index_entities(
             lines,
             start_index + 1,
             entity_end,
+            indent + 2,
         )
 
-        safe_entity_start = _extend_entity_start_to_comments(
-            lines,
-            block_start,
-            start_index,
-            indent,
-        )
-
-        if shared:
-            edit_start = block_start
-            edit_end = block_end
-        else:
-            edit_start = safe_entity_start
-            edit_end = entity_end
+        # 26A safety rule:
+        # child entities are navigation/search targets only.
+        # The smallest writable unit is the complete top-level
+        # Template list item so shared context and neighboring
+        # structure cannot be accidentally detached.
+        edit_start = block_start
+        edit_end = block_end
 
         stable_part = unique_id or f"{start_index + 1}:{name}"
 
@@ -326,14 +384,22 @@ def _find_unique_id(
     lines: list[str],
     start_index: int,
     end_index: int,
+    expected_indent: int,
 ) -> str | None:
-    """Return unique_id from an entity body when present."""
+    """Return the entity-level unique_id when present."""
     for index in range(start_index, end_index + 1):
         line = _without_line_ending(lines[index])
         match = _UNIQUE_ID_RE.match(line)
 
-        if match is not None:
-            return _clean_scalar(match.group("value"))
+        if match is None:
+            continue
+
+        indentation = len(line) - len(line.lstrip())
+
+        if indentation != expected_indent:
+            continue
+
+        return _clean_scalar(match.group("value"))
 
     return None
 
