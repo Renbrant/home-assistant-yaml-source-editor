@@ -255,7 +255,7 @@ test("Template Explorer reads blocks using backend-authoritative snapshot identi
   );
 });
 
-test("Template target uses a distinct read-only CodeMirror document mode", async () => {
+test("Template target uses a distinct editable CodeMirror document mode", async () => {
   const panel = await readFile(panelPath, "utf8");
   const attachEditor = methodBody(panel, "_attachSourceEditor()");
   const activeDocument = methodBody(
@@ -273,7 +273,7 @@ test("Template target uses a distinct read-only CodeMirror document mode", async
   );
   assert.match(
     activeDocument,
-    /readOnly: true/
+    /text: this\._templateBlockText/
   );
   assert.match(
     activeDocument,
@@ -282,14 +282,22 @@ test("Template target uses a distinct read-only CodeMirror document mode", async
 
   assert.match(
     attachEditor,
-    /readOnly,/
-  );
-  assert.match(
-    attachEditor,
-    /onChange: readOnly[\s\S]+undefined/
+    /_handleEditorChange/
   );
 
   assert.match(
+    templateSection,
+    /id="save-template-block"/
+  );
+  assert.match(
+    templateSection,
+    /Save Template/
+  );
+  assert.match(
+    templateSection,
+    /Home Assistant Template semantic validation/
+  );
+  assert.doesNotMatch(
     templateSection,
     /preview is read-only/
   );
@@ -596,3 +604,189 @@ function methodBody(source, signature) {
 
   throw new Error(`Unterminated method body: ${signature}`);
 }
+
+test("Template edits use a dedicated buffer and unsaved-change guard", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const changeHandler = methodBody(
+    panel,
+    "_handleTemplateEditorChange(text)"
+  );
+
+  const discardGuard = methodBody(
+    panel,
+    "_confirmDiscardUnsavedChanges()"
+  );
+
+  assert.match(
+    panel,
+    /this\._templateBlockText = ""/
+  );
+
+  assert.match(
+    panel,
+    /this\._lastSavedTemplateBlockText = ""/
+  );
+
+  assert.match(
+    panel,
+    /_hasUnsavedTemplateChanges\(\)/
+  );
+
+  assert.match(
+    changeHandler,
+    /this\._templateBlockText = text/
+  );
+
+  assert.match(
+    discardGuard,
+    /this\._hasUnsavedEditorChanges\(\)/
+  );
+
+  assert.match(
+    discardGuard,
+    /This Template block has unsaved changes/
+  );
+});
+
+test("same Template block child navigation preserves the active edit buffer", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+
+  assert.match(
+    selectTemplate,
+    /const sameLoadedBlock =/
+  );
+
+  assert.match(
+    selectTemplate,
+    /blockId === this\._selectedTemplateBlockId/
+  );
+
+  assert.match(
+    selectTemplate,
+    /!\["Stale", "Uncertain"\]\.includes/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._selectedTemplateEntityId = entityId/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._revealSelectedTemplateEntity\(\)/
+  );
+
+  const sameBlockStart = selectTemplate.indexOf(
+    "if (sameLoadedBlock)"
+  );
+
+  const discardStart = selectTemplate.indexOf(
+    "if (!this._confirmDiscardUnsavedChanges())"
+  );
+
+  assert.ok(
+    sameBlockStart !== -1 &&
+      discardStart !== -1 &&
+      sameBlockStart < discardStart,
+    "Same-block navigation must preserve edits before any discard prompt",
+  );
+});
+
+test("Template Save submits only backend snapshot identity and raw block text", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const saveTemplate = methodBody(
+    panel,
+    "async _saveTemplateBlock()"
+  );
+
+  assert.match(
+    saveTemplate,
+    /ha_yaml_source_editor\/templates\/block\/save/
+  );
+
+  assert.match(
+    saveTemplate,
+    /block_id: blockId/
+  );
+
+  assert.match(
+    saveTemplate,
+    /expected_source_sha256: expectedSourceSha256/
+  );
+
+  assert.match(
+    saveTemplate,
+    /replacement_text: submittedText/
+  );
+
+  assert.doesNotMatch(
+    saveTemplate,
+    /source_path|relative_path|start_line|end_line/
+  );
+
+  assert.match(
+    saveTemplate,
+    /templateBlockDocumentId\(result\)/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateBlockText === submittedText/
+  );
+
+  assert.match(
+    saveTemplate,
+    /newer editor changes remain unsaved/
+  );
+});
+
+test("Template Save refreshes authoritative Explorer state after stale or uncertain results", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const saveTemplate = methodBody(
+    panel,
+    "async _saveTemplateBlock()"
+  );
+
+  assert.match(
+    saveTemplate,
+    /template_source_changed/
+  );
+
+  assert.match(
+    saveTemplate,
+    /template_commit_uncertain/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateSaveStatus = "Stale"/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateSaveStatus = "Uncertain"/
+  );
+
+  const refreshMatches =
+    saveTemplate.match(
+      /this\._loadTemplateIndex\(\{\s*force: true,\s*\}\)/g
+    ) ?? [];
+
+  assert.ok(
+    refreshMatches.length >= 3,
+    "Save success, stale failure, and uncertain failure must refresh the Template index",
+  );
+
+  assert.match(
+    saveTemplate,
+    /Reopen the block/
+  );
+});

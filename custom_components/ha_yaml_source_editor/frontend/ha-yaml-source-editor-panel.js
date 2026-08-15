@@ -77,8 +77,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._selectedTemplateEntityId = null;
     this._templateBlockStatus = "Idle";
     this._templateBlockResult = null;
+    this._templateBlockText = "";
+    this._lastSavedTemplateBlockText = "";
     this._templateBlockError = null;
     this._templateBlockRequestId = 0;
+    this._templateSaveStatus = "Idle";
+    this._templateSaveMessage = null;
+    this._templateSaveRequestId = 0;
     this._openTemplateBlockIds = new Set();
     this._templateSearchQuery = "";
     this._selectedDashboardKey = null;
@@ -460,9 +465,72 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     );
   }
 
+  _hasUnsavedTemplateChanges() {
+    return Boolean(
+      this._selectedTemplateBlockId &&
+      this._templateBlockResult &&
+      this._templateBlockText !== this._lastSavedTemplateBlockText
+    );
+  }
+
+  _hasUnsavedEditorChanges() {
+    return (
+      this._hasUnsavedSourceChanges() ||
+      this._hasUnsavedTemplateChanges()
+    );
+  }
+
+  _templateEditorStateLabel() {
+    if (this._templateBlockStatus !== "Loaded") {
+      return this._templateBlockStatus;
+    }
+
+    if (this._templateSaveStatus === "Saving") {
+      return "Saving";
+    }
+
+    if (this._templateSaveStatus === "Uncertain") {
+      return "Commit uncertain";
+    }
+
+    if (this._templateSaveStatus === "Stale") {
+      return "Source changed";
+    }
+
+    if (this._hasUnsavedTemplateChanges()) {
+      return "Unsaved changes";
+    }
+
+    if (this._templateSaveStatus === "Error") {
+      return "Save error";
+    }
+
+    return "Saved";
+  }
+
+  _canSaveTemplateBlock() {
+    return Boolean(
+      this._selectedTemplateBlockId &&
+      this._templateBlockStatus === "Loaded" &&
+      this._templateBlockResult &&
+      this._hasUnsavedTemplateChanges() &&
+      !["Saving", "Stale", "Uncertain"].includes(
+        this._templateSaveStatus
+      ) &&
+      !this._isDeploymentInProgress() &&
+      !this._isResolutionInProgress()
+    );
+  }
+
   _confirmDiscardUnsavedChanges() {
-    if (!this._hasUnsavedSourceChanges()) {
+    if (!this._hasUnsavedEditorChanges()) {
       return true;
+    }
+
+    if (this._hasUnsavedTemplateChanges()) {
+      return window.confirm(
+        "This Template block has unsaved changes. Discard them and continue?"
+      );
     }
 
     return window.confirm(
@@ -517,8 +585,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       return {
         documentId,
-        text: this._templateBlockResult.block_text ?? "",
-        readOnly: true,
+        text: this._templateBlockText,
+        readOnly: false,
       };
     }
 
@@ -586,7 +654,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         readOnly,
         onChange: readOnly
           ? undefined
-          : (nextText) => this._handleSourceEditorChange(nextText),
+          : (nextText) => this._handleEditorChange(nextText),
         onStatusChange: (status) =>
           this._handleSourceEditorStatus(status),
       });
@@ -606,6 +674,40 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         }
       );
     }
+  }
+
+  _handleEditorChange(text) {
+    if (this._selectedTemplateBlockId) {
+      this._handleTemplateEditorChange(text);
+      return;
+    }
+
+    this._handleSourceEditorChange(text);
+  }
+
+  _handleTemplateEditorChange(text) {
+    if (
+      !this._selectedTemplateBlockId ||
+      this._templateBlockStatus !== "Loaded" ||
+      !this._templateBlockResult
+    ) {
+      return;
+    }
+
+    this._templateBlockText = text;
+
+    if (
+      !["Saving", "Stale", "Uncertain"].includes(
+        this._templateSaveStatus
+      )
+    ) {
+      this._templateSaveStatus = "Idle";
+    }
+
+    this._templateSaveMessage = null;
+
+    this._refreshEditorContextUi();
+    this._refreshSourceEditorUi();
   }
 
   _handleSourceEditorChange(text) {
@@ -641,6 +743,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       "initialize-source-from-ha"
     );
     const saveButton = this.shadowRoot.getElementById("save-source-document");
+    const templateSaveButton = this.shadowRoot.getElementById(
+      "save-template-block"
+    );
+    const templateSaveMessage = this.shadowRoot.getElementById(
+      "template-save-message"
+    );
     const validateButton = this.shadowRoot.getElementById("validate-source-document");
     const deployButton = this.shadowRoot.getElementById("deploy-saved-source");
     const compareButton = this.shadowRoot.getElementById("compare-source-ha");
@@ -687,6 +795,22 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       saveButton.disabled = !this._hasUnsavedSourceChanges();
     }
 
+    if (templateSaveButton) {
+      templateSaveButton.disabled = !this._canSaveTemplateBlock();
+    }
+
+    if (templateSaveMessage) {
+      const message = this._templateSaveMessage ?? "";
+      templateSaveMessage.textContent = message;
+      templateSaveMessage.hidden = message.length === 0;
+      templateSaveMessage.className =
+        ["Error", "Stale", "Uncertain"].includes(
+          this._templateSaveStatus
+        )
+          ? "state error"
+          : "state";
+    }
+
     if (validateButton) {
       validateButton.disabled = this._validationStatus === "Validating";
     }
@@ -728,7 +852,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     const editorState =
       this._selectedTemplateBlockId
-        ? "Read-only"
+        ? this._templateSaveStatus === "Saving"
+          ? "Saving"
+          : this._templateSaveStatus === "Uncertain"
+            ? "Uncertain"
+            : this._templateSaveStatus === "Stale"
+              ? "Stale"
+              : this._hasUnsavedTemplateChanges()
+                ? "Modified"
+                : "Saved"
         : this._hasUnsavedSourceChanges()
           ? "Modified"
           : "Saved";
@@ -945,8 +1077,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._selectedTemplateEntityId = null;
     this._templateBlockStatus = "Idle";
     this._templateBlockResult = null;
+    this._templateBlockText = "";
+    this._lastSavedTemplateBlockText = "";
     this._templateBlockError = null;
     this._templateBlockRequestId += 1;
+    this._templateSaveStatus = "Idle";
+    this._templateSaveMessage = null;
+    this._templateSaveRequestId += 1;
 
     if (hadTemplateSelection) {
       this._destroySourceEditor();
@@ -966,13 +1103,42 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       return;
     }
 
-    if (!this._confirmDiscardUnsavedChanges()) {
-      return;
-    }
-
     const index = this._templateIndex;
     const sourceSha256 = index?.source?.sha256;
     const indexedBlock = findTemplateBlock(index, blockId);
+
+    const sameLoadedBlock =
+      blockId === this._selectedTemplateBlockId &&
+      this._templateBlockStatus === "Loaded" &&
+      this._templateBlockResult &&
+      !["Stale", "Uncertain"].includes(
+        this._templateSaveStatus
+      );
+
+    if (sameLoadedBlock) {
+      if (
+        entityId &&
+        !findTemplateEntity(
+          this._templateBlockResult.block,
+          entityId
+        )
+      ) {
+        entityId = null;
+      }
+
+      this._selectedTemplateEntityId = entityId;
+      this._openTemplateBlockIds.add(blockId);
+
+      this._refreshTemplateTreeUi();
+      this._refreshEditorContextUi();
+      this._refreshInspectorUi();
+      this._revealSelectedTemplateEntity();
+      return;
+    }
+
+    if (!this._confirmDiscardUnsavedChanges()) {
+      return;
+    }
 
     if (!sourceSha256 || !indexedBlock) {
       this._templateBlockError =
@@ -1018,8 +1184,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       }
 
       this._templateBlockResult = result;
+      this._templateBlockText = result.block_text ?? "";
+      this._lastSavedTemplateBlockText = result.block_text ?? "";
       this._templateBlockStatus = "Loaded";
       this._templateBlockError = null;
+      this._templateSaveStatus = "Idle";
+      this._templateSaveMessage = null;
+      this._templateSaveRequestId += 1;
 
       this._render();
       this._revealSelectedTemplateEntity();
@@ -1035,6 +1206,146 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         "Unable to read the selected Template block.";
 
       this._render();
+    }
+  }
+
+
+  async _saveTemplateBlock() {
+    if (!this._canSaveTemplateBlock()) {
+      return;
+    }
+
+    const blockId = this._selectedTemplateBlockId;
+    const expectedSourceSha256 =
+      this._templateBlockResult?.source?.sha256;
+    const submittedText = this._templateBlockText;
+
+    if (!blockId || !expectedSourceSha256) {
+      this._templateSaveStatus = "Error";
+      this._templateSaveMessage =
+        "Template Source snapshot is unavailable. Reopen the block before saving.";
+      this._refreshEditorContextUi();
+      this._refreshSourceEditorUi();
+      this._refreshInspectorUi();
+      return;
+    }
+
+    const requestId = this._templateSaveRequestId + 1;
+    this._templateSaveRequestId = requestId;
+    this._templateSaveStatus = "Saving";
+    this._templateSaveMessage =
+      "Validating and saving the targeted Template block.";
+
+    this._refreshEditorContextUi();
+    this._refreshSourceEditorUi();
+    this._refreshInspectorUi();
+
+    try {
+      const result =
+        await this._hass.connection.sendMessagePromise({
+          type: "ha_yaml_source_editor/templates/block/save",
+          block_id: blockId,
+          expected_source_sha256: expectedSourceSha256,
+          replacement_text: submittedText,
+        });
+
+      if (
+        requestId !== this._templateSaveRequestId ||
+        blockId !== this._selectedTemplateBlockId
+      ) {
+        return;
+      }
+
+      const savedText =
+        result?.block_text ?? submittedText;
+
+      this._templateBlockResult = result;
+      this._lastSavedTemplateBlockText = savedText;
+
+      const newDocumentId =
+        templateBlockDocumentId(result);
+
+      if (newDocumentId) {
+        // The editor already contains the submitted text. Update only its
+        // logical snapshot identity so a later structural render does not
+        // recreate the CodeMirror document after a successful save.
+        this._sourceEditorDocumentId = newDocumentId;
+      }
+
+      if (this._templateBlockText === submittedText) {
+        this._templateBlockText = savedText;
+        this._templateSaveStatus = "Saved";
+        this._templateSaveMessage = result?.changed
+          ? "Template block saved and verified."
+          : "Template block already matched the physical Source.";
+      } else {
+        // Editing remained available while the save request was in flight.
+        // Keep those newer keystrokes untouched and treat them as a new
+        // unsaved edit based on the successfully saved snapshot.
+        this._templateSaveStatus = "Idle";
+        this._templateSaveMessage =
+          "Submitted snapshot saved; newer editor changes remain unsaved.";
+      }
+
+      await this._loadTemplateIndex({
+        force: true,
+      });
+
+      if (
+        requestId !== this._templateSaveRequestId ||
+        blockId !== this._selectedTemplateBlockId
+      ) {
+        return;
+      }
+
+      this._refreshEditorContextUi();
+      this._refreshSourceEditorUi();
+      this._refreshInspectorUi();
+    } catch (err) {
+      if (
+        requestId !== this._templateSaveRequestId ||
+        blockId !== this._selectedTemplateBlockId
+      ) {
+        return;
+      }
+
+      const code = err?.code ?? "";
+
+      if (code === "template_source_changed") {
+        this._templateSaveStatus = "Stale";
+        this._templateSaveMessage =
+          "Template Source changed outside this editor. Explorer was refreshed. Reopen the block to reconcile before saving again.";
+
+        await this._loadTemplateIndex({
+          force: true,
+        });
+      } else if (
+        code === "template_commit_uncertain"
+      ) {
+        this._templateSaveStatus = "Uncertain";
+        this._templateSaveMessage =
+          "The save may already have changed the physical Template Source, but verification did not complete. Explorer was refreshed. Reopen the block and reconcile before saving again.";
+
+        await this._loadTemplateIndex({
+          force: true,
+        });
+      } else {
+        this._templateSaveStatus = "Error";
+        this._templateSaveMessage =
+          err?.message ||
+          "Unable to save the Template block.";
+      }
+
+      if (
+        requestId !== this._templateSaveRequestId ||
+        blockId !== this._selectedTemplateBlockId
+      ) {
+        return;
+      }
+
+      this._refreshEditorContextUi();
+      this._refreshSourceEditorUi();
+      this._refreshInspectorUi();
     }
   }
 
@@ -2908,6 +3219,18 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     const { block, source } = this._templateBlockResult;
+    const saveDisabled =
+      this._canSaveTemplateBlock()
+        ? ""
+        : "disabled";
+    const saveMessage =
+      this._templateSaveMessage ?? "";
+    const saveMessageClass =
+      ["Error", "Stale", "Uncertain"].includes(
+        this._templateSaveStatus
+      )
+        ? "state error"
+        : "state";
     const range =
       Number.isFinite(block?.start_line) &&
       Number.isFinite(block?.end_line)
@@ -2937,11 +3260,39 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <dd>Complete top-level Template block</dd>
         </dl>
 
+        <nav
+          class="command-bar"
+          aria-label="Template workflow commands"
+        >
+          <div
+            class="workflow-actions"
+            aria-label="Template workflow"
+          >
+            <button
+              type="button"
+              id="save-template-block"
+              ${saveDisabled}
+            >
+              Save Template
+            </button>
+          </div>
+        </nav>
+
+        <p
+          id="template-save-message"
+          class="${saveMessageClass}"
+          ${saveMessage ? "" : "hidden"}
+        >${this._escapeHtml(saveMessage)}</p>
+
         <div class="source-editor">
           <label for="source-code-editor-host">Template YAML</label>
           <p class="state">
             Exact raw YAML from the selected top-level Template block.
-            This preview is read-only and does not modify templates.yaml.
+            The complete top-level block is the writable unit; child
+            entities are navigation targets only. Save performs structural
+            checks, Home Assistant Template semantic validation, stale
+            snapshot checks, atomic replacement, and read-back verification.
+            It does not automatically reload or restart Home Assistant.
           </p>
 
           <div class="source-code-editor-shell">
@@ -3518,9 +3869,9 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
       return `
         <span>Template: ${this._escapeHtml(
-          this._templateBlockStatus
+          this._templateEditorStateLabel()
         )}</span>
-        <span>Mode: Read-only</span>
+        <span>Mode: Editable block</span>
         <span>Snapshot: ${this._escapeHtml(
           shortSnapshot
         )}</span>
@@ -3750,7 +4101,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           )}</dd>
 
           <dt>Mode</dt>
-          <dd>Read-only</dd>
+          <dd>Editable top-level block</dd>
+
+          <dt>Save state</dt>
+          <dd>${this._escapeHtml(
+            this._templateEditorStateLabel()
+          )}</dd>
 
           <dt>Source</dt>
           <dd>${this._escapeHtml(sourcePath)}</dd>
@@ -5126,6 +5482,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const saveSource = this.shadowRoot.getElementById("save-source-document");
     if (saveSource) {
       saveSource.onclick = () => this._saveSourceDocument();
+    }
+
+    const saveTemplate = this.shadowRoot.getElementById(
+      "save-template-block"
+    );
+    if (saveTemplate) {
+      saveTemplate.onclick = () => this._saveTemplateBlock();
     }
 
     const validateSource = this.shadowRoot.getElementById(
