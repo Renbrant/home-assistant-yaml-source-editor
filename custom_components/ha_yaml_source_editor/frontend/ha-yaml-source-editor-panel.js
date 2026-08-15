@@ -61,6 +61,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._dashboardLoading = false;
     this._dashboards = [];
     this._dashboardError = null;
+    this._templateStatus = "Connecting";
+    this._templateRequested = false;
+    this._templateLoading = false;
+    this._templateIndex = null;
+    this._templateError = null;
     this._selectedDashboardKey = null;
     this._selectedDashboard = null;
     this._configStatus = "No dashboard selected";
@@ -115,6 +120,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._refreshRoutineUi();
     this._loadStatus();
     this._loadDashboards();
+    this._loadTemplateIndex();
   }
 
   connectedCallback() {
@@ -123,6 +129,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
     this._loadStatus();
     this._loadDashboards();
+    this._loadTemplateIndex();
   }
 
   disconnectedCallback() {
@@ -248,6 +255,46 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
   }
 
+  async _loadTemplateIndex({ force = false } = {}) {
+    if (!this._canUseConnection() || this._templateLoading) {
+      return;
+    }
+
+    if (this._templateRequested && !force) {
+      return;
+    }
+
+    this._templateRequested = true;
+    this._templateLoading = true;
+    this._templateStatus = "Connecting";
+    this._templateError = null;
+    this._refreshTemplateTreeUi();
+
+    try {
+      const result = await this._hass.connection.sendMessagePromise({
+        type: "ha_yaml_source_editor/templates/index",
+      });
+
+      this._templateIndex = result ?? null;
+
+      if (result?.available) {
+        this._templateStatus = "Connected";
+        this._templateError = null;
+      } else {
+        this._templateStatus = "Unavailable";
+        this._templateError =
+          result?.message || "No supported YAML Template Source was discovered.";
+      }
+    } catch (err) {
+      this._templateIndex = null;
+      this._templateStatus = "Error";
+      this._templateError =
+        err?.message || "Unable to discover YAML Template Sources.";
+    } finally {
+      this._templateLoading = false;
+      this._refreshTemplateTreeUi();
+    }
+  }
   _refreshDashboards() {
     if (this._isDeploymentInProgress()) {
       this._deploymentMessage = "Deployment is in progress.";
@@ -268,6 +315,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._clearSelectedDashboard();
     this._render();
     this._loadDashboards({ force: true });
+    this._loadTemplateIndex({ force: true });
   }
 
   _clearSelectedDashboard() {
@@ -737,6 +785,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._wireDashboardCardHandlers(storageDashboards);
   }
 
+  _refreshTemplateTreeUi() {
+    const templateTree = this.shadowRoot.getElementById("template-tree-body");
+    if (templateTree) {
+      templateTree.innerHTML = this._renderTemplateTree();
+    }
+  }
   _refreshEditorContextUi() {
     const target = this.shadowRoot.querySelector(".editor-target");
     if (!target) {
@@ -2215,7 +2269,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     return `
-      <ul class="dashboard-list">
+      <ul class="dashboard-list explorer-tree">
         ${dashboards
           .map((dashboard) => {
             const dashboardKey = this._dashboardKey(dashboard);
@@ -2223,26 +2277,210 @@ class HaYamlSourceEditorPanel extends HTMLElement {
               dashboardKey === this._selectedDashboardKey ? " selected" : "";
 
             return `
-              <li>
+              <li class="explorer-tree-item">
                 <button
                   type="button"
-                  class="dashboard-card${selectedClass}"
+                  class="dashboard-card explorer-tree-row${selectedClass}"
                   data-dashboard-key="${this._escapeHtml(dashboardKey)}"
                 >
-                  <div class="dashboard-title">${this._escapeHtml(
-                    this._dashboardTitle(dashboard)
-                  )}</div>
-                  <div class="dashboard-meta">
-                    <span>${this._escapeHtml(this._dashboardPath(dashboard))}</span>
-                    <span class="mode">${this._escapeHtml(
-                      this._formatMode(dashboard.mode)
+                  <span class="explorer-tree-icon" aria-hidden="true">◇</span>
+                  <span class="explorer-tree-content">
+                    <span class="dashboard-title">${this._escapeHtml(
+                      this._dashboardTitle(dashboard)
                     )}</span>
-                  </div>
+                    <span class="dashboard-meta">
+                      ${this._escapeHtml(this._dashboardPath(dashboard))}
+                    </span>
+                  </span>
                 </button>
               </li>
             `;
           })
           .join("")}
+      </ul>
+    `;
+  }
+
+  _renderTemplateTree() {
+    if (this._templateLoading || this._templateStatus === "Connecting") {
+      return `<p class="state">Loading YAML Templates...</p>`;
+    }
+
+    if (this._templateStatus === "Error") {
+      return `<p class="state error">${this._escapeHtml(
+        this._templateError || "Unable to discover YAML Template Sources."
+      )}</p>`;
+    }
+
+    const index = this._templateIndex;
+
+    if (!index?.available) {
+      return `<p class="state">${this._escapeHtml(
+        this._templateError ||
+          index?.message ||
+          "No supported YAML Template Source was discovered."
+      )}</p>`;
+    }
+
+    const source = index.source ?? {};
+    const blocks = Array.isArray(index.blocks) ? index.blocks : [];
+
+    const sourceMeta = [
+      Number.isFinite(source.entity_count)
+        ? `${source.entity_count} template${source.entity_count === 1 ? "" : "s"}`
+        : null,
+      Number.isFinite(source.line_count)
+        ? `${source.line_count} lines`
+        : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    return `
+      <ul class="template-tree explorer-tree">
+        <li class="template-file-node">
+          <details class="explorer-tree-details" open>
+            <summary class="explorer-tree-row explorer-tree-summary">
+              <span class="explorer-tree-icon file-icon" aria-hidden="true">Y</span>
+              <span class="explorer-tree-content">
+                <span class="explorer-tree-label">${this._escapeHtml(
+                  source.path || index.include_path || "Template Source"
+                )}</span>
+                ${
+                  sourceMeta
+                    ? `<span class="explorer-tree-meta">${this._escapeHtml(
+                        sourceMeta
+                      )}</span>`
+                    : ""
+                }
+              </span>
+            </summary>
+
+            <ul class="explorer-tree explorer-tree-children">
+              ${
+                blocks.length === 0
+                  ? `
+                    <li>
+                      <div class="explorer-tree-row explorer-tree-leaf">
+                        <span class="explorer-tree-icon" aria-hidden="true">•</span>
+                        <span class="explorer-tree-content">
+                          <span class="explorer-tree-label">No indexed Template blocks</span>
+                        </span>
+                      </div>
+                    </li>
+                  `
+                  : blocks
+                      .map((block) => {
+                        const entities = Array.isArray(block.entities)
+                          ? block.entities
+                          : [];
+
+                        const blockLabel =
+                          block.label ||
+                          block.section ||
+                          `Template block ${block.block_number ?? ""}`;
+
+                        const blockRange =
+                          Number.isFinite(block.start_line) &&
+                          Number.isFinite(block.end_line)
+                            ? `L${block.start_line}-L${block.end_line}`
+                            : "";
+
+                        const badge = block.shared
+                          ? "SHARED"
+                          : String(block.block_type || "BLOCK").toUpperCase();
+
+                        if (entities.length === 0) {
+                          return `
+                            <li class="template-block-node">
+                              <div class="explorer-tree-row explorer-tree-leaf">
+                                <span class="explorer-tree-icon" aria-hidden="true">◆</span>
+                                <span class="explorer-tree-content">
+                                  <span class="explorer-tree-label">${this._escapeHtml(
+                                    blockLabel
+                                  )}</span>
+                                  <span class="explorer-tree-meta">${this._escapeHtml(
+                                    blockRange
+                                  )}</span>
+                                </span>
+                                <span class="explorer-tree-badge">${this._escapeHtml(
+                                  badge
+                                )}</span>
+                              </div>
+                            </li>
+                          `;
+                        }
+
+                        return `
+                          <li class="template-block-node">
+                            <details class="explorer-tree-details">
+                              <summary class="explorer-tree-row explorer-tree-summary">
+                                <span class="explorer-tree-icon" aria-hidden="true">◆</span>
+                                <span class="explorer-tree-content">
+                                  <span class="explorer-tree-label">${this._escapeHtml(
+                                    blockLabel
+                                  )}</span>
+                                  <span class="explorer-tree-meta">${this._escapeHtml(
+                                    blockRange
+                                  )}</span>
+                                </span>
+                                <span class="explorer-tree-badge">${this._escapeHtml(
+                                  badge
+                                )}</span>
+                              </summary>
+
+                              <ul class="explorer-tree explorer-tree-children">
+                                ${entities
+                                  .map((entity) => {
+                                    const entityRange =
+                                      Number.isFinite(entity.start_line) &&
+                                      Number.isFinite(entity.end_line)
+                                        ? `L${entity.start_line}-L${entity.end_line}`
+                                        : "";
+
+                                    const entityMeta = [
+                                      entity.unique_id || null,
+                                      entityRange || null,
+                                    ]
+                                      .filter(Boolean)
+                                      .join(" · ");
+
+                                    return `
+                                      <li class="template-entity-node">
+                                        <div
+                                          class="explorer-tree-row explorer-tree-leaf template-entity-row"
+                                          data-template-entity-id="${this._escapeHtml(
+                                            entity.entity_id || ""
+                                          )}"
+                                        >
+                                          <span class="explorer-tree-icon" aria-hidden="true">•</span>
+                                          <span class="explorer-tree-content">
+                                            <span class="explorer-tree-label">${this._escapeHtml(
+                                              entity.name || "Unnamed Template"
+                                            )}</span>
+                                            ${
+                                              entityMeta
+                                                ? `<span class="explorer-tree-meta">${this._escapeHtml(
+                                                    entityMeta
+                                                  )}</span>`
+                                                : ""
+                                            }
+                                          </span>
+                                        </div>
+                                      </li>
+                                    `;
+                                  })
+                                  .join("")}
+                              </ul>
+                            </details>
+                          </li>
+                        `;
+                      })
+                      .join("")
+              }
+            </ul>
+          </details>
+        </li>
       </ul>
     `;
   }
@@ -3127,21 +3365,45 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         <div class="region-header">
           <div>
             <div class="region-kicker">Explorer</div>
-            <h2>Dashboards</h2>
+            <h2>Home Assistant</h2>
           </div>
           <button type="button" id="refresh-dashboards" ${refreshDisabled}>
             Refresh
           </button>
         </div>
+
         <div id="explorer-alerts">${this._renderExplorerAlerts()}</div>
-        <section class="section first-section">
-          <h3>Storage Mode</h3>
-          <div id="dashboard-list-body">
-            ${this._renderDashboardList(storageDashboards)}
-          </div>
-        </section>
-        <div id="unsupported-dashboard-list">
-          ${this._renderUnsupportedList(unsupportedDashboards)}
+
+        <div class="explorer-source-tree">
+          <details class="explorer-group" open>
+            <summary class="explorer-group-summary">
+              <span>Dashboards</span>
+            </summary>
+
+            <div class="explorer-group-body">
+              <div class="explorer-subheading">Storage Mode</div>
+
+              <div id="dashboard-list-body">
+                ${this._renderDashboardList(storageDashboards)}
+              </div>
+
+              <div id="unsupported-dashboard-list">
+                ${this._renderUnsupportedList(unsupportedDashboards)}
+              </div>
+            </div>
+          </details>
+
+          <details class="explorer-group" open>
+            <summary class="explorer-group-summary">
+              <span>YAML Templates</span>
+            </summary>
+
+            <div class="explorer-group-body">
+              <div id="template-tree-body">
+                ${this._renderTemplateTree()}
+              </div>
+            </div>
+          </details>
         </div>
       </aside>
     `;
@@ -3527,6 +3789,169 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           cursor: default;
         }
 
+        .explorer-source-tree {
+          display: grid;
+          gap: 2px;
+          margin-top: 8px;
+        }
+
+        .explorer-group {
+          margin: 0;
+          border-bottom: 1px solid var(--divider-color);
+        }
+
+        .explorer-group-summary {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          min-height: 30px;
+          padding: 4px 6px;
+          list-style: none;
+          cursor: pointer;
+          user-select: none;
+          font-size: 13px;
+          font-weight: 600;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+
+        .explorer-group-summary::-webkit-details-marker,
+        .explorer-tree-summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .explorer-group-summary::before,
+        .explorer-tree-summary::before {
+          content: "▸";
+          display: inline-block;
+          flex: 0 0 12px;
+          width: 12px;
+          font-size: 11px;
+          text-align: center;
+        }
+
+        .explorer-group[open] > .explorer-group-summary::before,
+        .explorer-tree-details[open] > .explorer-tree-summary::before {
+          content: "▾";
+        }
+
+        .explorer-group-body {
+          padding: 2px 0 8px;
+        }
+
+        .explorer-subheading {
+          padding: 4px 8px 4px 24px;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+          font-weight: 500;
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
+        }
+
+        .explorer-tree {
+          margin: 0;
+          padding: 0;
+          list-style: none;
+        }
+
+        .explorer-tree-children {
+          padding-left: 16px;
+        }
+
+        .explorer-tree-item,
+        .template-file-node,
+        .template-block-node,
+        .template-entity-node {
+          min-width: 0;
+        }
+
+        .explorer-tree-details {
+          min-width: 0;
+        }
+
+        .explorer-tree-row {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          width: 100%;
+          min-width: 0;
+          box-sizing: border-box;
+          min-height: 28px;
+          padding: 3px 6px;
+          border-radius: 4px;
+          color: var(--primary-text-color);
+        }
+
+        .explorer-tree-summary {
+          list-style: none;
+          cursor: pointer;
+          user-select: none;
+        }
+
+        .explorer-tree-summary::before {
+          margin-right: -3px;
+        }
+
+        .explorer-tree-leaf {
+          padding-left: 21px;
+        }
+
+        .explorer-tree-icon {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 16px;
+          width: 16px;
+          font-size: 11px;
+          line-height: 1;
+        }
+
+        .file-icon {
+          font-weight: 700;
+        }
+
+        .explorer-tree-content {
+          display: flex;
+          flex: 1 1 auto;
+          min-width: 0;
+          flex-direction: column;
+          gap: 1px;
+        }
+
+        .explorer-tree-label {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          font-size: 13px;
+        }
+
+        .explorer-tree-meta {
+          min-width: 0;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+          color: var(--secondary-text-color);
+          font-size: 11px;
+        }
+
+        .explorer-tree-badge {
+          flex: 0 0 auto;
+          padding: 1px 4px;
+          border: 1px solid var(--divider-color);
+          border-radius: 3px;
+          color: var(--secondary-text-color);
+          font-size: 9px;
+          line-height: 1.4;
+        }
+
+        .explorer-tree-row:hover {
+          background: var(--secondary-background-color);
+        }
+
+        .template-entity-row {
+          cursor: default;
+        }
         .dashboard-list {
           display: grid;
           gap: 8px;
@@ -3592,6 +4017,39 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           letter-spacing: 0;
         }
 
+        .dashboard-list {
+          gap: 1px;
+        }
+
+        .dashboard-list li {
+          border: 0;
+          border-radius: 4px;
+          background: transparent;
+        }
+
+        .dashboard-card {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          min-height: 28px;
+          padding: 3px 6px 3px 21px;
+          border-radius: 4px;
+        }
+
+        .dashboard-card.selected {
+          box-shadow: inset 3px 0 0 var(--primary-color);
+        }
+
+        .dashboard-title {
+          margin-bottom: 0;
+          font-size: 13px;
+          font-weight: 500;
+        }
+
+        .dashboard-meta {
+          display: block;
+          font-size: 11px;
+        }
         .state {
           margin: 0;
           padding: 12px;

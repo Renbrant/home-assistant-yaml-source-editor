@@ -2,7 +2,7 @@
 
 DOMAIN = "ha_yaml_source_editor"
 NAME = "HA YAML Source Editor"
-VERSION = "0.2.2"
+VERSION = "0.3.0"
 PANEL_FRONTEND_REVISION = 1
 PANEL_ASSET_IDENTITY = f"{VERSION}-r{PANEL_FRONTEND_REVISION}"
 
@@ -24,6 +24,7 @@ WS_TYPE_DOCUMENTS_SAVE_SOURCE = f"{DOMAIN}/documents/save_source"
 WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT = f"{DOMAIN}/documents/record_deployment"
 WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION = f"{DOMAIN}/documents/import_ha_version"
 WS_TYPE_HASH_SHA256 = f"{DOMAIN}/hash/sha256"
+WS_TYPE_TEMPLATES_INDEX = f"{DOMAIN}/templates/index"
 
 DOCUMENT_STORAGE_KEY = f"{DOMAIN}.documents"
 DOCUMENT_STORAGE_VERSION = 1

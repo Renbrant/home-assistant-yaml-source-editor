@@ -175,10 +175,51 @@ test("Explorer omits normal Integration API status card and keeps navigation", a
   assert.match(explorer, /Storage Mode/);
   assert.doesNotMatch(explorer, /Integration version/);
   assert.doesNotMatch(explorer, /Backend API/);
-  assert.doesNotMatch(explorer, /Home Assistant/);
+  assert.match(explorer, /Home Assistant/);
+  assert.match(explorer, /YAML Templates/);
+  assert.match(explorer, /id="template-tree-body"/);
+  assert.match(explorer, /class="explorer-group"/);
   assert.match(panel, /Unable to reach the HA YAML Source Editor backend API/);
 });
 
+test("Explorer loads Template index through partial refresh without remounting the editor", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const loadTemplates =
+    panel.match(
+      /async _loadTemplateIndex\(\{ force = false \} = \{\}\) \{[\s\S]+?\n  \}/
+    )?.[0] ?? "";
+
+  assert.notEqual(loadTemplates, "", "Missing _loadTemplateIndex method");
+  assert.match(
+    loadTemplates,
+    /type: "ha_yaml_source_editor\/templates\/index"/
+  );
+  assert.match(loadTemplates, /this\._refreshTemplateTreeUi\(\)/);
+  assert.doesNotMatch(loadTemplates, /this\._render\(\)/);
+  assert.doesNotMatch(
+    loadTemplates,
+    /_attachSourceEditor|_destroySourceEditor|createSourceCodeEditor/
+  );
+
+  assert.match(panel, /this\._loadTemplateIndex\(\)/);
+  assert.match(panel, /_renderTemplateTree\(\)/);
+  assert.match(panel, /id="template-tree-body"/);
+  assert.match(panel, /YAML Templates/);
+});
+test("Explorer refresh reloads both dashboards and Template index", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const refreshDashboards = methodBody(panel, "_refreshDashboards()");
+
+  assert.match(
+    refreshDashboards,
+    /this\._loadDashboards\(\{\s*force:\s*true\s*\}\)/
+  );
+  assert.match(
+    refreshDashboards,
+    /this\._loadTemplateIndex\(\{\s*force:\s*true\s*\}\)/
+  );
+});
 test("Editor header owns dashboard context and labeled source statuses", async () => {
   const panel = await readFile(panelPath, "utf8");
   const appHeader = panel.match(

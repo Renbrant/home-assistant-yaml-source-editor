@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
@@ -24,6 +26,7 @@ from .const import (
     WS_TYPE_DOCUMENTS_SAVE_SOURCE,
     WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
+    WS_TYPE_TEMPLATES_INDEX,
 )
 from .document_store import (
     DocumentAlreadyExistsError,
@@ -36,6 +39,7 @@ from .document_store import (
     SourceTextTooLargeError,
 )
 from .hashing import sha256_text
+from .template_navigator import TemplateSourceError, build_template_index
 
 
 def async_register_commands(hass: HomeAssistant) -> None:
@@ -48,6 +52,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_record_deployment)
     websocket_api.async_register_command(hass, websocket_documents_import_ha_version)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
+    websocket_api.async_register_command(hass, websocket_templates_index)
 
 
 def _document_store(hass: HomeAssistant) -> SourceDocumentStore:
@@ -316,3 +321,27 @@ async def websocket_documents_import_ha_version(
         return
 
     connection.send_result(msg["id"], {"document": document})
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TEMPLATES_INDEX})
+@websocket_api.async_response
+async def websocket_templates_index(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return a read-only index of the configured YAML Template Source."""
+    try:
+        result = await hass.async_add_executor_job(
+            build_template_index,
+            Path(hass.config.config_dir),
+        )
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(msg["id"], result)
