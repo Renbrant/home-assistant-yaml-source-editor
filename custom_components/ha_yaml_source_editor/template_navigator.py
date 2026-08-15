@@ -1,12 +1,19 @@
-"""Read-only discovery and indexing for Home Assistant YAML Template sources."""
+"""Lossless discovery, indexing, and targeted writes for YAML Template sources."""
 
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 import shlex
+import stat
+import tempfile
+import threading
 from typing import Any
+
+import yaml
+from yaml.nodes import SequenceNode
 
 CONFIGURATION_FILENAME = "configuration.yaml"
 MAX_TEMPLATE_SOURCE_BYTES = 8 * 1024 * 1024
@@ -42,6 +49,8 @@ _SHARED_KEYS = {
     "actions",
 }
 
+_TEMPLATE_WRITE_LOCK = threading.Lock()
+
 
 class TemplateSourceError(Exception):
     """Base error for Template Source discovery/indexing."""
@@ -60,6 +69,14 @@ class TemplateBlockNotFoundError(TemplateSourceError):
 
 class TemplateSourceChangedError(TemplateSourceError):
     """Raised when the Template Source changed after Explorer indexing."""
+
+
+class TemplateSourceValidationError(TemplateSourceError):
+    """Raised when a proposed targeted edit is not safe valid Template YAML."""
+
+
+class TemplateSourceWriteError(TemplateSourceError):
+    """Raised when a targeted Template Source write cannot be completed safely."""
 
 
 def build_template_index(config_dir: str | Path) -> dict[str, Any]:
@@ -218,6 +235,387 @@ def get_template_block(
         "block": block,
         "block_text": block_text,
     }
+
+
+
+def save_template_block(
+    config_dir: str | Path,
+    block_id: str,
+    expected_source_sha256: str,
+    replacement_text: str,
+) -> dict[str, Any]:
+    """Atomically replace one backend-indexed top-level Template block.
+
+    The frontend supplies only block identity, the Source snapshot SHA,
+    and replacement raw text. Path and line range are always rediscovered
+    by the backend.
+
+    Unrelated Source text is never parsed and reserialized. The proposed
+    complete file is parsed only for validation, then written as raw UTF-8
+    bytes using an atomic same-directory replacement.
+    """
+    with _TEMPLATE_WRITE_LOCK:
+        return _save_template_block_locked(
+            config_dir,
+            block_id,
+            expected_source_sha256,
+            replacement_text,
+        )
+
+
+def _save_template_block_locked(
+    config_dir: str | Path,
+    block_id: str,
+    expected_source_sha256: str,
+    replacement_text: str,
+) -> dict[str, Any]:
+    """Perform one targeted Template block write while holding the write lock."""
+    root = Path(config_dir).resolve()
+    current_index = build_template_index(root)
+
+    if not current_index.get("available"):
+        raise TemplateSourceError(
+            current_index.get("message")
+            or "No supported YAML Template Source is currently available."
+        )
+
+    source = current_index["source"]
+    current_sha256 = source["sha256"]
+
+    if current_sha256 != expected_source_sha256:
+        raise TemplateSourceChangedError(
+            "Template Source changed after Explorer indexing. Refresh and try again."
+        )
+
+    block = next(
+        (
+            candidate
+            for candidate in current_index.get("blocks", [])
+            if candidate.get("block_id") == block_id
+        ),
+        None,
+    )
+
+    if block is None:
+        raise TemplateBlockNotFoundError(
+            "Template block was not found in the current Source index."
+        )
+
+    source_path = resolve_config_path(
+        root,
+        source["relative_path"],
+    )
+
+    source_text, source_bytes = _read_utf8_file(source_path)
+    verified_sha256 = hashlib.sha256(source_bytes).hexdigest()
+
+    if (
+        verified_sha256 != current_sha256
+        or verified_sha256 != expected_source_sha256
+    ):
+        raise TemplateSourceChangedError(
+            "Template Source changed while preparing the save. Refresh and try again."
+        )
+
+    # Reject obviously oversized edits before composing a second complete
+    # Source string in memory.
+    if len(replacement_text) > MAX_TEMPLATE_SOURCE_BYTES:
+        raise TemplateSourceTooLargeError(
+            "Edited Template block exceeds the 8 MiB safety limit."
+        )
+
+    try:
+        replacement_size = len(
+            replacement_text.encode("utf-8")
+        )
+    except UnicodeEncodeError as err:
+        raise TemplateSourceValidationError(
+            "Edited Template block cannot be encoded as UTF-8."
+        ) from err
+
+    if replacement_size > MAX_TEMPLATE_SOURCE_BYTES:
+        raise TemplateSourceTooLargeError(
+            "Edited Template block exceeds the 8 MiB safety limit."
+        )
+
+    lines = source_text.splitlines(keepends=True)
+    start_index = block["start_line"] - 1
+    end_index = block["end_line"]
+
+    if (
+        start_index < 0
+        or end_index <= start_index
+        or end_index > len(lines)
+    ):
+        raise TemplateSourceError(
+            "Template block range is invalid for the current Source."
+        )
+
+    original_block_text = "".join(
+        lines[start_index:end_index]
+    )
+
+    if (
+        _ends_with_line_break(original_block_text)
+        and not _ends_with_line_break(replacement_text)
+    ):
+        raise TemplateSourceValidationError(
+            "The edited Template block must keep its terminating line break."
+        )
+
+    _validate_replacement_block(replacement_text)
+
+    prefix = "".join(lines[:start_index])
+    suffix = "".join(lines[end_index:])
+    proposed_text = prefix + replacement_text + suffix
+
+    try:
+        proposed_bytes = proposed_text.encode("utf-8")
+    except UnicodeEncodeError as err:
+        raise TemplateSourceValidationError(
+            "Edited Template block cannot be encoded as UTF-8."
+        ) from err
+
+    if len(proposed_bytes) > MAX_TEMPLATE_SOURCE_BYTES:
+        raise TemplateSourceTooLargeError(
+            "Template Source exceeds the 8 MiB safety limit."
+        )
+
+    _validate_complete_template_yaml(proposed_text)
+
+    proposed_blocks = index_template_text(proposed_text)
+
+    if len(proposed_blocks) != len(current_index.get("blocks", [])):
+        raise TemplateSourceValidationError(
+            "The edited block must remain exactly one top-level Template block."
+        )
+
+    proposed_block = next(
+        (
+            candidate
+            for candidate in proposed_blocks
+            if candidate.get("block_id") == block_id
+        ),
+        None,
+    )
+
+    if proposed_block is None:
+        raise TemplateSourceValidationError(
+            "The edited block no longer maps to its original Template block."
+        )
+
+    replacement_line_count = len(
+        replacement_text.splitlines(keepends=True)
+    )
+    expected_end_line = (
+        block["start_line"]
+        + replacement_line_count
+        - 1
+    )
+
+    if (
+        proposed_block["start_line"] != block["start_line"]
+        or proposed_block["end_line"] != expected_end_line
+    ):
+        raise TemplateSourceValidationError(
+            "The edited text must remain entirely inside the selected "
+            "top-level Template block."
+        )
+
+    if proposed_bytes == source_bytes:
+        result = get_template_block(
+            root,
+            block_id,
+            expected_source_sha256,
+        )
+        result["changed"] = False
+        result["previous_source_sha256"] = expected_source_sha256
+        return result
+
+    try:
+        source_mode = stat.S_IMODE(
+            source_path.stat().st_mode
+        )
+    except OSError as err:
+        raise TemplateSourceWriteError(
+            "Unable to inspect Template Source file permissions."
+        ) from err
+
+    _atomic_replace_bytes(
+        source_path,
+        proposed_bytes,
+        expected_source_sha256,
+        source_mode,
+    )
+
+    readback_text, readback_bytes = _read_utf8_file(
+        source_path
+    )
+
+    if readback_bytes != proposed_bytes:
+        raise TemplateSourceChangedError(
+            "Template Source changed immediately after the targeted save."
+        )
+
+    new_sha256 = hashlib.sha256(
+        readback_bytes
+    ).hexdigest()
+
+    # Parse once more from the exact bytes read back from disk.
+    _validate_complete_template_yaml(readback_text)
+
+    result = get_template_block(
+        root,
+        block_id,
+        new_sha256,
+    )
+    result["changed"] = True
+    result["previous_source_sha256"] = expected_source_sha256
+    return result
+
+
+def _validate_replacement_block(replacement_text: str) -> None:
+    """Require replacement text to describe exactly one writable block."""
+    if not replacement_text:
+        raise TemplateSourceValidationError(
+            "Edited Template block cannot be empty."
+        )
+
+    blocks = index_template_text(replacement_text)
+
+    if len(blocks) != 1:
+        raise TemplateSourceValidationError(
+            "Edited text must contain exactly one top-level Template block."
+        )
+
+    block = blocks[0]
+
+    if block["start_line"] != 1:
+        raise TemplateSourceValidationError(
+            "Edited Template block must begin on its first line."
+        )
+
+    replacement_lines = replacement_text.splitlines(
+        keepends=True
+    )
+    indexed_text = "".join(
+        replacement_lines[:block["end_line"]]
+    )
+
+    if indexed_text != replacement_text:
+        raise TemplateSourceValidationError(
+            "Edited Template block cannot contain raw text outside "
+            "its writable block range."
+        )
+
+
+def _validate_complete_template_yaml(source_text: str) -> None:
+    """Parse the complete proposed file without constructing or emitting YAML."""
+    try:
+        documents = list(
+            yaml.compose_all(
+                source_text,
+                Loader=yaml.BaseLoader,
+            )
+        )
+    except yaml.YAMLError as err:
+        mark = getattr(err, "problem_mark", None)
+        problem = getattr(err, "problem", None)
+
+        location = ""
+        if mark is not None:
+            location = (
+                f" at line {mark.line + 1}, "
+                f"column {mark.column + 1}"
+            )
+
+        detail = (
+            f": {problem}"
+            if isinstance(problem, str) and problem
+            else ""
+        )
+
+        raise TemplateSourceValidationError(
+            f"Template YAML is invalid{location}{detail}."
+        ) from err
+
+    if (
+        len(documents) != 1
+        or not isinstance(documents[0], SequenceNode)
+    ):
+        raise TemplateSourceValidationError(
+            "Template Source must contain exactly one YAML document "
+            "with a top-level list."
+        )
+
+
+def _atomic_replace_bytes(
+    source_path: Path,
+    proposed_bytes: bytes,
+    expected_source_sha256: str,
+    source_mode: int,
+) -> None:
+    """Write bytes to a sibling temp file and atomically replace the Source."""
+    try:
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{source_path.name}.",
+            suffix=".tmp",
+            dir=source_path.parent,
+        )
+    except OSError as err:
+        raise TemplateSourceWriteError(
+            "Unable to create a temporary Template Source file."
+        ) from err
+
+    temp_path = Path(temp_name)
+
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(proposed_bytes)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.chmod(temp_path, source_mode)
+
+        # Verify the real Source only after the complete temp file is ready.
+        # This makes the stale-check window before os.replace() as small as
+        # practical while also serializing writes initiated by this integration.
+        try:
+            latest_bytes = source_path.read_bytes()
+        except OSError as err:
+            raise TemplateSourceChangedError(
+                "Template Source became unavailable before the targeted save."
+            ) from err
+
+        latest_sha256 = hashlib.sha256(
+            latest_bytes
+        ).hexdigest()
+
+        if latest_sha256 != expected_source_sha256:
+            raise TemplateSourceChangedError(
+                "Template Source changed before the targeted save could be committed."
+            )
+
+        os.replace(temp_path, source_path)
+
+    except TemplateSourceError:
+        raise
+    except OSError as err:
+        raise TemplateSourceWriteError(
+            "Unable to atomically replace the Template Source."
+        ) from err
+    finally:
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
+def _ends_with_line_break(text: str) -> bool:
+    """Return whether raw text ends with a line separator."""
+    return text.endswith(("\n", "\r"))
+
 
 def find_simple_template_include(configuration_text: str) -> str | None:
     """Return the path from a simple top-level template !include declaration."""
@@ -379,16 +777,21 @@ def _content_end_at_eof(
     lines: list[str],
     block_start: int,
 ) -> int:
-    """Trim only trailing blank lines at EOF from a writable block."""
+    """Exclude trailing external raw text from the last writable block."""
     end_index = len(lines) - 1
 
     while end_index > block_start:
         line = _without_line_ending(lines[end_index])
 
-        if line.strip():
-            break
+        if not line.strip():
+            end_index -= 1
+            continue
 
-        end_index -= 1
+        if line.startswith("#"):
+            end_index -= 1
+            continue
+
+        break
 
     return max(block_start, end_index)
 
