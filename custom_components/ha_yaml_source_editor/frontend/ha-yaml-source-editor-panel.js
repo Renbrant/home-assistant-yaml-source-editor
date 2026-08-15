@@ -33,6 +33,7 @@ import {
 } from "./conflict-resolution-logic.mjs";
 import { isBlankSourceText } from "./source-bootstrap.mjs";
 import {
+  filterTemplateBlocks,
   findTemplateBlock,
   findTemplateEntity,
   templateBlockDocumentId,
@@ -79,6 +80,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._templateBlockError = null;
     this._templateBlockRequestId = 0;
     this._openTemplateBlockIds = new Set();
+    this._templateSearchQuery = "";
     this._selectedDashboardKey = null;
     this._selectedDashboard = null;
     this._configStatus = "No dashboard selected";
@@ -2525,6 +2527,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     const source = index.source ?? {};
     const blocks = Array.isArray(index.blocks) ? index.blocks : [];
+    const searchQuery = this._templateSearchQuery.trim();
+    const filteredBlocks = filterTemplateBlocks(
+      index,
+      searchQuery
+    );
 
     const sourceMeta = [
       Number.isFinite(source.entity_count)
@@ -2559,18 +2566,22 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
             <ul class="explorer-tree explorer-tree-children">
               ${
-                blocks.length === 0
+                filteredBlocks.length === 0
                   ? `
                     <li>
                       <div class="explorer-tree-row explorer-tree-leaf">
                         <span class="explorer-tree-icon" aria-hidden="true">•</span>
                         <span class="explorer-tree-content">
-                          <span class="explorer-tree-label">No indexed Template blocks</span>
+                          <span class="explorer-tree-label">${
+                            searchQuery
+                              ? "No Templates match your search"
+                              : "No indexed Template blocks"
+                          }</span>
                         </span>
                       </div>
                     </li>
                   `
-                  : blocks
+                  : filteredBlocks
                       .map((block) => {
                         const entities = Array.isArray(block.entities)
                           ? block.entities
@@ -2596,6 +2607,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
                           !this._selectedTemplateEntityId
                             ? " selected"
                             : "";
+
+                        const blockOpen =
+                          Boolean(searchQuery) ||
+                          this._openTemplateBlockIds.has(block.block_id);
 
                         if (entities.length === 0) {
                           return `
@@ -2629,7 +2644,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
                               class="explorer-tree-details"
                               data-template-block-id="${this._escapeHtml(
                                 block.block_id || ""
-                              )}"${this._openTemplateBlockIds.has(block.block_id) ? " open" : ""}
+                              )}"${blockOpen ? " open" : ""}
                             >
                               <summary
                                 class="explorer-tree-row explorer-tree-summary template-block-summary${blockSelectedClass}"
@@ -3879,6 +3894,21 @@ class HaYamlSourceEditorPanel extends HTMLElement {
             </summary>
 
             <div class="explorer-group-body">
+              <div class="template-search">
+                <input
+                  id="template-search-input"
+                  type="search"
+                  value="${this._escapeHtml(this._templateSearchQuery)}"
+                  placeholder="Search templates..."
+                  aria-label="Search YAML Templates by name, unique ID, or section"
+                  autocomplete="off"
+                  spellcheck="false"
+                />
+                <span class="template-search-hint">
+                  name · unique_id · section
+                </span>
+              </div>
+
               <div id="template-tree-body">
                 ${this._renderTemplateTree()}
               </div>
@@ -4337,6 +4367,39 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           font-weight: 500;
           text-transform: uppercase;
           letter-spacing: 0.04em;
+        }
+
+        .template-search {
+          display: grid;
+          gap: 4px;
+          padding: 4px 8px 8px 24px;
+        }
+
+        .template-search input {
+          width: 100%;
+          min-width: 0;
+          height: 30px;
+          box-sizing: border-box;
+          padding: 4px 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 4px;
+          color: var(--primary-text-color);
+          background: var(--primary-background-color);
+          font: inherit;
+          font-size: 12px;
+        }
+
+        .template-search input:focus {
+          border-color: var(--primary-color);
+          outline: none;
+        }
+
+        .template-search-hint {
+          overflow: hidden;
+          color: var(--secondary-text-color);
+          font-size: 10px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
         }
 
         .explorer-tree {
@@ -5037,6 +5100,17 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._wireDashboardCardHandlers(storageDashboards);
     this._wireTemplateTreeHandlers();
 
+    const templateSearch = this.shadowRoot.getElementById(
+      "template-search-input"
+    );
+
+    if (templateSearch) {
+      templateSearch.oninput = () => {
+        this._templateSearchQuery = templateSearch.value;
+        this._refreshTemplateTreeUi();
+      };
+    }
+
     const createSource = this.shadowRoot.getElementById("create-source-document");
     if (createSource) {
       createSource.onclick = () => this._createSourceDocument();
@@ -5097,6 +5171,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         const blockId = details.dataset.templateBlockId;
 
         if (!blockId) {
+          return;
+        }
+
+        // Search results are expanded temporarily for visibility.
+        // Do not let those synthetic open states overwrite the user's
+        // normal Explorer expansion preferences.
+        if (this._templateSearchQuery.trim()) {
           return;
         }
 

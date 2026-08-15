@@ -32,3 +32,75 @@ export function templateEntityLocalLine(block, entityId) {
 
   return Math.max(1, entity.start_line - block.start_line + 1);
 }
+
+export function filterTemplateBlocks(index, query) {
+  const blocks = Array.isArray(index?.blocks) ? index.blocks : [];
+  const tokens = normalizeTemplateSearchTokens(query);
+
+  if (tokens.length === 0) {
+    return blocks;
+  }
+
+  return blocks.flatMap((block) => {
+    const entities = Array.isArray(block?.entities)
+      ? block.entities
+      : [];
+
+    const blockText = templateSearchText(
+      block?.label,
+      block?.section
+    );
+
+    const blockMatches = tokens.every((token) =>
+      blockText.includes(token)
+    );
+
+    if (blockMatches) {
+      return [
+        {
+          ...block,
+          entities,
+        },
+      ];
+    }
+
+    const matchingEntities = entities.filter((entity) => {
+      const entityText = templateSearchText(
+        block?.label,
+        block?.section,
+        entity?.name,
+        entity?.unique_id
+      );
+
+      return tokens.every((token) =>
+        entityText.includes(token)
+      );
+    });
+
+    if (matchingEntities.length === 0) {
+      return [];
+    }
+
+    return [
+      {
+        ...block,
+        entities: matchingEntities,
+      },
+    ];
+  });
+}
+
+function normalizeTemplateSearchTokens(query) {
+  return String(query ?? "")
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function templateSearchText(...values) {
+  return values
+    .filter((value) => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+}

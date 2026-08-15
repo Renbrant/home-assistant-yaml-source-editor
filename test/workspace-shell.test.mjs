@@ -345,10 +345,68 @@ test("Template child navigation preserves Explorer expansion and remains non-fat
   );
 
   assert.match(
+    wireTree,
+    /this\._templateSearchQuery\.trim\(\)[\s\S]+return/
+  );
+
+  assert.match(
     revealEntity,
     /typeof this\._sourceEditor\.revealLine === "function"/
   );
 });
+test("Template search filters the existing index without remounting its input", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const renderTree = methodBody(
+    panel,
+    "_renderTemplateTree()"
+  );
+  const refreshTree = methodBody(
+    panel,
+    "_refreshTemplateTreeUi()"
+  );
+
+
+  assert.match(
+    panel,
+    /id="template-search-input"/
+  );
+
+  assert.match(
+    renderTree,
+    /filterTemplateBlocks/
+  );
+
+  assert.match(
+    renderTree,
+    /this\._templateSearchQuery/
+  );
+
+  assert.match(
+    renderTree,
+    /Boolean\(searchQuery\)/
+  );
+
+  assert.match(
+    panel,
+    /templateSearch\.oninput/
+  );
+
+  assert.match(
+    panel,
+    /this\._templateSearchQuery = templateSearch\.value/
+  );
+
+  assert.match(
+    panel,
+    /this\._refreshTemplateTreeUi\(\)/
+  );
+
+  assert.doesNotMatch(
+    refreshTree,
+    /template-search-input|_render\(\)/
+  );
+});
+
 test("Editor header owns dashboard context and labeled source statuses", async () => {
   const panel = await readFile(panelPath, "utf8");
   const appHeader = panel.match(

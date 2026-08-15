@@ -37,22 +37,22 @@ class PanelModuleUrlTest(unittest.TestCase):
 
     def test_panel_module_url_uses_frontend_asset_identity_query(self) -> None:
         self.assertEqual(const_module.VERSION, "0.3.0")
-        self.assertEqual(const_module.PANEL_FRONTEND_REVISION, 3)
-        self.assertEqual(const_module.PANEL_ASSET_IDENTITY, "0.3.0-r3")
+        self.assertEqual(const_module.PANEL_FRONTEND_REVISION, 5)
+        self.assertEqual(const_module.PANEL_ASSET_IDENTITY, "0.3.0-r5")
         self.assertEqual(
             const_module.PANEL_MODULE_URL,
-            "/ha_yaml_source_editor/frontend/0.3.0-r3/ha-yaml-source-editor-panel.js?v=0.3.0-r3",
+            "/ha_yaml_source_editor/frontend/0.3.0-r5/ha-yaml-source-editor-panel.js?v=0.3.0-r5",
         )
 
     def test_frontend_static_path_uses_asset_identity(self) -> None:
         self.assertEqual(
             const_module.PANEL_STATIC_PATH,
-            "/ha_yaml_source_editor/frontend/0.3.0-r3",
+            "/ha_yaml_source_editor/frontend/0.3.0-r5",
         )
     def test_panel_web_component_uses_frontend_asset_identity(self) -> None:
         self.assertEqual(
             const_module.PANEL_WEB_COMPONENT,
-            "ha-yaml-source-editor-panel-0-3-0-r3",
+            "ha-yaml-source-editor-panel-0-3-0-r5",
         )
 
 
