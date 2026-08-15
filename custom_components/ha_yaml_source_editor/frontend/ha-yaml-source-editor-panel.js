@@ -32,6 +32,12 @@ import {
   assessOverwritePreflight,
 } from "./conflict-resolution-logic.mjs";
 import { isBlankSourceText } from "./source-bootstrap.mjs";
+import {
+  findTemplateBlock,
+  findTemplateEntity,
+  templateBlockDocumentId,
+  templateEntityLocalLine,
+} from "./template-source-logic.mjs";
 
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
 const INSPECTOR_WIDE_LAYOUT_MIN_WIDTH = 1100;
@@ -66,6 +72,13 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._templateLoading = false;
     this._templateIndex = null;
     this._templateError = null;
+    this._selectedTemplateBlockId = null;
+    this._selectedTemplateEntityId = null;
+    this._templateBlockStatus = "Idle";
+    this._templateBlockResult = null;
+    this._templateBlockError = null;
+    this._templateBlockRequestId = 0;
+    this._openTemplateBlockIds = new Set();
     this._selectedDashboardKey = null;
     this._selectedDashboard = null;
     this._configStatus = "No dashboard selected";
@@ -81,6 +94,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceRequestId = 0;
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
+    this._sourceEditorReadOnly = null;
     this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
     this._validationStatus = "Not validated";
     this._validationResult = null;
@@ -312,6 +326,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       return;
     }
 
+    this._clearTemplateSelection();
     this._clearSelectedDashboard();
     this._render();
     this._loadDashboards({ force: true });
@@ -484,6 +499,38 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._compareRequestId += 1;
   }
 
+  _activeEditorDocument() {
+    if (
+      this._selectedTemplateBlockId &&
+      this._templateBlockStatus === "Loaded" &&
+      this._templateBlockResult
+    ) {
+      const documentId = templateBlockDocumentId(
+        this._templateBlockResult
+      );
+
+      if (!documentId) {
+        return null;
+      }
+
+      return {
+        documentId,
+        text: this._templateBlockResult.block_text ?? "",
+        readOnly: true,
+      };
+    }
+
+    if (!this._sourceDocument) {
+      return null;
+    }
+
+    return {
+      documentId: this._sourceDocument.document_id,
+      text: this._sourceText,
+      readOnly: false,
+    };
+  }
+
   _destroySourceEditor() {
     if (!this._sourceEditor) {
       return;
@@ -492,6 +539,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceEditor.destroy();
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
+    this._sourceEditorReadOnly = null;
     this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
   }
 
@@ -509,30 +557,52 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _attachSourceEditor() {
     const host = this.shadowRoot.getElementById("source-code-editor-host");
+    const editorDocument = this._activeEditorDocument();
 
-    if (!host || !this._sourceDocument) {
+    if (!host || !editorDocument) {
       this._destroySourceEditor();
       return;
     }
 
-    const documentId = this._sourceDocument.document_id;
+    const {
+      documentId,
+      text,
+      readOnly,
+    } = editorDocument;
+
+    if (
+      this._sourceEditor &&
+      this._sourceEditorReadOnly !== readOnly
+    ) {
+      this._destroySourceEditor();
+    }
+
     if (!this._sourceEditor) {
       this._sourceEditor = createSourceCodeEditor({
         parent: host,
-        doc: this._sourceText,
-        onChange: (text) => this._handleSourceEditorChange(text),
-        onStatusChange: (status) => this._handleSourceEditorStatus(status),
+        doc: text,
+        readOnly,
+        onChange: readOnly
+          ? undefined
+          : (nextText) => this._handleSourceEditorChange(nextText),
+        onStatusChange: (status) =>
+          this._handleSourceEditorStatus(status),
       });
       this._sourceEditorDocumentId = documentId;
+      this._sourceEditorReadOnly = readOnly;
       return;
     }
 
     this._sourceEditor.attach(host);
 
     if (this._sourceEditorDocumentId !== documentId) {
-      this._replaceSourceEditorText(this._sourceText, documentId, {
-        resetHistory: true,
-      });
+      this._replaceSourceEditorText(
+        text,
+        documentId,
+        {
+          resetHistory: true,
+        }
+      );
     }
   }
 
@@ -654,8 +724,14 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       return;
     }
 
-    const modified = this._hasUnsavedSourceChanges() ? "Modified" : "Saved";
-    statusBar.textContent = `Ln ${this._sourceEditorStatus.line}, Col ${this._sourceEditorStatus.column}    ${this._sourceEditorStatus.lineCount} ${this._sourceEditorStatus.lineCount === 1 ? "line" : "lines"}    YAML    LF    ${modified}`;
+    const editorState =
+      this._selectedTemplateBlockId
+        ? "Read-only"
+        : this._hasUnsavedSourceChanges()
+          ? "Modified"
+          : "Saved";
+
+    statusBar.textContent = `Ln ${this._sourceEditorStatus.line}, Col ${this._sourceEditorStatus.column}    ${this._sourceEditorStatus.lineCount} ${this._sourceEditorStatus.lineCount === 1 ? "line" : "lines"}    YAML    LF    ${editorState}`;
   }
 
   _refreshSyncUi() {
@@ -786,30 +862,29 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _refreshTemplateTreeUi() {
-    const templateTree = this.shadowRoot.getElementById("template-tree-body");
+    const templateTree = this.shadowRoot.getElementById(
+      "template-tree-body"
+    );
+
     if (templateTree) {
       templateTree.innerHTML = this._renderTemplateTree();
+      this._wireTemplateTreeHandlers();
     }
   }
+
   _refreshEditorContextUi() {
     const target = this.shadowRoot.querySelector(".editor-target");
-    if (!target) {
-      return;
+    const summary = this.shadowRoot.querySelector(
+      ".editor-state-summary"
+    );
+
+    if (target) {
+      target.innerHTML = this._renderEditorTargetContents();
     }
 
-    const dashboard = this._selectedDashboard;
-    const dashboardTitle = dashboard
-      ? this._dashboardTitle(dashboard)
-      : "No dashboard selected";
-    const dashboardPath = dashboard ? this._dashboardPath(dashboard) : "";
-    target.innerHTML = `
-      <span>${this._escapeHtml(dashboardTitle)}</span>
-      ${
-        dashboardPath
-          ? `<span class="editor-target-path">${this._escapeHtml(dashboardPath)}</span>`
-          : ""
-      }
-    `;
+    if (summary) {
+      summary.innerHTML = this._renderEditorStateSummary();
+    }
   }
 
   _refreshDeploymentUi() {
@@ -859,6 +934,130 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._refreshDashboardConfigJson();
   }
 
+  _clearTemplateSelection() {
+    const hadTemplateSelection =
+      this._selectedTemplateBlockId !== null ||
+      this._templateBlockResult !== null;
+
+    this._selectedTemplateBlockId = null;
+    this._selectedTemplateEntityId = null;
+    this._templateBlockStatus = "Idle";
+    this._templateBlockResult = null;
+    this._templateBlockError = null;
+    this._templateBlockRequestId += 1;
+
+    if (hadTemplateSelection) {
+      this._destroySourceEditor();
+    }
+  }
+
+  async _selectTemplateBlock(blockId, entityId = null) {
+    if (this._isDeploymentInProgress()) {
+      this._deploymentMessage = "Deployment is in progress.";
+      this._render();
+      return;
+    }
+
+    if (this._isResolutionInProgress()) {
+      this._resolutionMessage = "Conflict resolution is in progress.";
+      this._render();
+      return;
+    }
+
+    if (!this._confirmDiscardUnsavedChanges()) {
+      return;
+    }
+
+    const index = this._templateIndex;
+    const sourceSha256 = index?.source?.sha256;
+    const indexedBlock = findTemplateBlock(index, blockId);
+
+    if (!sourceSha256 || !indexedBlock) {
+      this._templateBlockError =
+        "Template block is not available in the current Explorer index.";
+      this._templateBlockStatus = "Error";
+      this._render();
+      return;
+    }
+
+    if (
+      entityId &&
+      !findTemplateEntity(indexedBlock, entityId)
+    ) {
+      entityId = null;
+    }
+
+    this._clearTemplateSelection();
+    this._clearSelectedDashboard();
+
+    // Keep the selected logical block expanded while the editor target changes.
+    this._openTemplateBlockIds.add(blockId);
+
+    const requestId = this._templateBlockRequestId + 1;
+    this._templateBlockRequestId = requestId;
+    this._selectedTemplateBlockId = blockId;
+    this._selectedTemplateEntityId = entityId;
+    this._templateBlockStatus = "Loading";
+    this._templateBlockResult = null;
+    this._templateBlockError = null;
+
+    this._render();
+
+    try {
+      const result =
+        await this._hass.connection.sendMessagePromise({
+          type: "ha_yaml_source_editor/templates/block/get",
+          block_id: blockId,
+          expected_source_sha256: sourceSha256,
+        });
+
+      if (requestId !== this._templateBlockRequestId) {
+        return;
+      }
+
+      this._templateBlockResult = result;
+      this._templateBlockStatus = "Loaded";
+      this._templateBlockError = null;
+
+      this._render();
+      this._revealSelectedTemplateEntity();
+    } catch (err) {
+      if (requestId !== this._templateBlockRequestId) {
+        return;
+      }
+
+      this._templateBlockResult = null;
+      this._templateBlockStatus = "Error";
+      this._templateBlockError =
+        err?.message ||
+        "Unable to read the selected Template block.";
+
+      this._render();
+    }
+  }
+
+  _revealSelectedTemplateEntity() {
+    if (
+      !this._sourceEditor ||
+      !this._selectedTemplateEntityId ||
+      !this._templateBlockResult?.block
+    ) {
+      return;
+    }
+
+    const localLine = templateEntityLocalLine(
+      this._templateBlockResult.block,
+      this._selectedTemplateEntityId
+    );
+
+    if (
+      localLine != null &&
+      typeof this._sourceEditor.revealLine === "function"
+    ) {
+      this._sourceEditor.revealLine(localLine);
+    }
+  }
+
   _selectDashboard(dashboard) {
     if (this._isDeploymentInProgress()) {
       this._deploymentMessage = "Deployment is in progress.";
@@ -875,6 +1074,8 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     if (!this._confirmDiscardUnsavedChanges()) {
       return;
     }
+
+    this._clearTemplateSelection();
 
     const requestId = this._configRequestId + 1;
     this._configRequestId = requestId;
@@ -2390,10 +2591,21 @@ class HaYamlSourceEditorPanel extends HTMLElement {
                           ? "SHARED"
                           : String(block.block_type || "BLOCK").toUpperCase();
 
+                        const blockSelectedClass =
+                          this._selectedTemplateBlockId === block.block_id &&
+                          !this._selectedTemplateEntityId
+                            ? " selected"
+                            : "";
+
                         if (entities.length === 0) {
                           return `
                             <li class="template-block-node">
-                              <div class="explorer-tree-row explorer-tree-leaf">
+                              <div
+                                class="explorer-tree-row explorer-tree-leaf template-block-open${blockSelectedClass}"
+                                data-template-block-id="${this._escapeHtml(
+                                  block.block_id || ""
+                                )}"
+                              >
                                 <span class="explorer-tree-icon" aria-hidden="true">◆</span>
                                 <span class="explorer-tree-content">
                                   <span class="explorer-tree-label">${this._escapeHtml(
@@ -2413,8 +2625,18 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
                         return `
                           <li class="template-block-node">
-                            <details class="explorer-tree-details">
-                              <summary class="explorer-tree-row explorer-tree-summary">
+                            <details
+                              class="explorer-tree-details"
+                              data-template-block-id="${this._escapeHtml(
+                                block.block_id || ""
+                              )}"${this._openTemplateBlockIds.has(block.block_id) ? " open" : ""}
+                            >
+                              <summary
+                                class="explorer-tree-row explorer-tree-summary template-block-summary${blockSelectedClass}"
+                                data-template-block-id="${this._escapeHtml(
+                                  block.block_id || ""
+                                )}"
+                              >
                                 <span class="explorer-tree-icon" aria-hidden="true">◆</span>
                                 <span class="explorer-tree-content">
                                   <span class="explorer-tree-label">${this._escapeHtml(
@@ -2445,10 +2667,21 @@ class HaYamlSourceEditorPanel extends HTMLElement {
                                       .filter(Boolean)
                                       .join(" · ");
 
+                                    const entitySelectedClass =
+                                      this._selectedTemplateBlockId ===
+                                        block.block_id &&
+                                      this._selectedTemplateEntityId ===
+                                        entity.entity_id
+                                        ? " selected"
+                                        : "";
+
                                     return `
                                       <li class="template-entity-node">
                                         <div
-                                          class="explorer-tree-row explorer-tree-leaf template-entity-row"
+                                          class="explorer-tree-row explorer-tree-leaf template-entity-row${entitySelectedClass}"
+                                          data-template-block-id="${this._escapeHtml(
+                                            block.block_id || ""
+                                          )}"
                                           data-template-entity-id="${this._escapeHtml(
                                             entity.entity_id || ""
                                           )}"
@@ -2620,6 +2853,91 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <div id="source-editor-status" class="source-editor-status"></div>
         </div>
       </div>
+    `;
+  }
+
+  _renderTemplateBlockSection() {
+    if (!this._selectedTemplateBlockId) {
+      return "";
+    }
+
+    if (this._templateBlockStatus === "Loading") {
+      return `
+        <section class="section">
+          <h2>Template block</h2>
+          <p class="state">Loading exact raw Template YAML...</p>
+        </section>
+      `;
+    }
+
+    if (this._templateBlockStatus === "Error") {
+      return `
+        <section class="section">
+          <h2>Template block</h2>
+          <p class="state error">${this._escapeHtml(
+            this._templateBlockError ||
+              "Unable to load Template block."
+          )}</p>
+          <p class="state">
+            Refresh Explorer before retrying if the Template Source changed.
+          </p>
+        </section>
+      `;
+    }
+
+    if (
+      this._templateBlockStatus !== "Loaded" ||
+      !this._templateBlockResult
+    ) {
+      return "";
+    }
+
+    const { block, source } = this._templateBlockResult;
+    const range =
+      Number.isFinite(block?.start_line) &&
+      Number.isFinite(block?.end_line)
+        ? `L${block.start_line}-L${block.end_line}`
+        : "-";
+
+    return `
+      <section class="section">
+        <h2>Template block</h2>
+
+        <dl class="source-status template-source-status">
+          <dt>Source</dt>
+          <dd>${this._escapeHtml(source?.path ?? "-")}</dd>
+
+          <dt>Logical block</dt>
+          <dd>${this._escapeHtml(
+            block?.label ??
+              block?.section ??
+              block?.block_id ??
+              "-"
+          )}</dd>
+
+          <dt>Physical range</dt>
+          <dd>${this._escapeHtml(range)}</dd>
+
+          <dt>Edit unit</dt>
+          <dd>Complete top-level Template block</dd>
+        </dl>
+
+        <div class="source-editor">
+          <label for="source-code-editor-host">Template YAML</label>
+          <p class="state">
+            Exact raw YAML from the selected top-level Template block.
+            This preview is read-only and does not modify templates.yaml.
+          </p>
+
+          <div class="source-code-editor-shell">
+            <div id="source-code-editor-host"></div>
+            <div
+              id="source-editor-status"
+              class="source-editor-status"
+            ></div>
+          </div>
+        </div>
+      </section>
     `;
   }
 
@@ -3101,30 +3419,120 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
-  _renderEditorContext() {
+  _renderEditorTargetContents() {
+    if (this._selectedTemplateBlockId) {
+      const block =
+        this._templateBlockResult?.block ??
+        findTemplateBlock(
+          this._templateIndex,
+          this._selectedTemplateBlockId
+        );
+
+      const entity = findTemplateEntity(
+        block,
+        this._selectedTemplateEntityId
+      );
+
+      const label =
+        entity?.name ??
+        block?.label ??
+        block?.section ??
+        "Template block";
+
+      const sourcePath =
+        this._templateBlockResult?.source?.path ??
+        this._templateIndex?.source?.path ??
+        "";
+
+      const range =
+        Number.isFinite(block?.start_line) &&
+        Number.isFinite(block?.end_line)
+          ? `L${block.start_line}-L${block.end_line}`
+          : "";
+
+      return `
+        <span>${this._escapeHtml(label)}</span>
+        ${
+          sourcePath
+            ? `<span class="editor-target-path">${this._escapeHtml(
+                sourcePath
+              )}</span>`
+            : ""
+        }
+        ${
+          range
+            ? `<span class="editor-target-path">${this._escapeHtml(
+                range
+              )}</span>`
+            : ""
+        }
+      `;
+    }
+
     const dashboard = this._selectedDashboard;
     const dashboardTitle = dashboard
       ? this._dashboardTitle(dashboard)
       : "No dashboard selected";
-    const dashboardPath = dashboard ? this._dashboardPath(dashboard) : "";
+    const dashboardPath = dashboard
+      ? this._dashboardPath(dashboard)
+      : "";
 
+    return `
+      <span>${this._escapeHtml(dashboardTitle)}</span>
+      ${
+        dashboardPath
+          ? `<span class="editor-target-path">${this._escapeHtml(
+              dashboardPath
+            )}</span>`
+          : ""
+      }
+    `;
+  }
+
+  _renderEditorStateSummary() {
+    if (this._selectedTemplateBlockId) {
+      const sha256 =
+        this._templateBlockResult?.source?.sha256 ??
+        this._templateIndex?.source?.sha256 ??
+        "";
+
+      const shortSnapshot =
+        sha256.length >= 12
+          ? sha256.slice(0, 12)
+          : sha256 || "Unavailable";
+
+      return `
+        <span>Template: ${this._escapeHtml(
+          this._templateBlockStatus
+        )}</span>
+        <span>Mode: Read-only</span>
+        <span>Snapshot: ${this._escapeHtml(
+          shortSnapshot
+        )}</span>
+      `;
+    }
+
+    return `
+      <span id="editor-source-status-value">${this._escapeHtml(
+        `Source: ${this._sourceStateLabel()}`
+      )}</span>
+      <span id="editor-sync-status-value">${this._escapeHtml(
+        `Source vs HA: ${this._sourceVsHa}`
+      )}</span>
+    `;
+  }
+
+  _renderEditorContext() {
     return `
       <div class="editor-context">
         <div class="editor-target">
-          <span>${this._escapeHtml(dashboardTitle)}</span>
-          ${
-            dashboardPath
-              ? `<span class="editor-target-path">${this._escapeHtml(dashboardPath)}</span>`
-              : ""
-          }
+          ${this._renderEditorTargetContents()}
         </div>
-        <div class="editor-state-summary" aria-label="Current source and synchronization state">
-          <span id="editor-source-status-value">${this._escapeHtml(
-            `Source: ${this._sourceStateLabel()}`
-          )}</span>
-          <span id="editor-sync-status-value">${this._escapeHtml(
-            `Source vs HA: ${this._sourceVsHa}`
-          )}</span>
+        <div
+          class="editor-state-summary"
+          aria-label="Current editor target state"
+        >
+          ${this._renderEditorStateSummary()}
         </div>
       </div>
     `;
@@ -3292,7 +3700,79 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+  _renderTemplateInspectorPanel() {
+    const block =
+      this._templateBlockResult?.block ??
+      findTemplateBlock(
+        this._templateIndex,
+        this._selectedTemplateBlockId
+      );
+
+    const entity = findTemplateEntity(
+      block,
+      this._selectedTemplateEntityId
+    );
+
+    const sourcePath =
+      this._templateBlockResult?.source?.path ??
+      this._templateIndex?.source?.path ??
+      "-";
+
+    const range =
+      Number.isFinite(block?.start_line) &&
+      Number.isFinite(block?.end_line)
+        ? `L${block.start_line}-L${block.end_line}`
+        : "-";
+
+    return `
+      <section class="section first-section">
+        <h2>Template Source</h2>
+
+        <dl class="inspector-summary">
+          <dt>Status</dt>
+          <dd>${this._escapeHtml(
+            this._templateBlockStatus
+          )}</dd>
+
+          <dt>Mode</dt>
+          <dd>Read-only</dd>
+
+          <dt>Source</dt>
+          <dd>${this._escapeHtml(sourcePath)}</dd>
+
+          <dt>Block</dt>
+          <dd>${this._escapeHtml(
+            block?.label ??
+              block?.section ??
+              block?.block_id ??
+              "-"
+          )}</dd>
+
+          <dt>Range</dt>
+          <dd>${this._escapeHtml(range)}</dd>
+
+          <dt>Selected entity</dt>
+          <dd>${this._escapeHtml(
+            entity?.name ?? "-"
+          )}</dd>
+        </dl>
+
+        ${
+          this._templateBlockError
+            ? `<p class="state error">${this._escapeHtml(
+                this._templateBlockError
+              )}</p>`
+            : ""
+        }
+      </section>
+    `;
+  }
+
   _renderInspectorPanel() {
+    if (this._selectedTemplateBlockId) {
+      return this._renderTemplateInspectorPanel();
+    }
+
     if (this._inspectorTab === "details") {
       return `
         ${this._renderConfigurationSection()}
@@ -3410,17 +3890,28 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _renderEditorRegion() {
+    const templateMode =
+      this._selectedTemplateBlockId !== null;
+
     return `
       <main class="workspace-region editor-region" aria-label="Editor">
         <div class="region-header">
           <div>
             <div class="region-kicker">Editor</div>
-            <h2>Source YAML</h2>
+            <h2>${templateMode ? "Template YAML" : "Source YAML"}</h2>
           </div>
         </div>
+
         ${this._renderEditorContext()}
-        ${this._renderCommandBar()}
-        ${this._renderSourceDocumentSection()}
+
+        ${
+          templateMode
+            ? this._renderTemplateBlockSection()
+            : `
+                ${this._renderCommandBar()}
+                ${this._renderSourceDocumentSection()}
+              `
+        }
       </main>
     `;
   }
@@ -3949,8 +4440,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           background: var(--secondary-background-color);
         }
 
+        .template-block-open,
+        .template-block-summary .explorer-tree-content,
         .template-entity-row {
-          cursor: default;
+          cursor: pointer;
+        }
+
+        .explorer-tree-row.selected {
+          background: var(--secondary-background-color);
+          box-shadow: inset 3px 0 0 var(--primary-color);
         }
         .dashboard-list {
           display: grid;
@@ -4537,6 +5035,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     this._wireDashboardCardHandlers(storageDashboards);
+    this._wireTemplateTreeHandlers();
 
     const createSource = this.shadowRoot.getElementById("create-source-document");
     if (createSource) {
@@ -4585,6 +5084,84 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     const overwriteHa = this.shadowRoot.getElementById("overwrite-ha-source");
     if (overwriteHa) {
       overwriteHa.onclick = () => this._overwriteHaWithSavedSource();
+    }
+  }
+
+  _wireTemplateTreeHandlers() {
+    for (
+      const details of this.shadowRoot.querySelectorAll(
+        ".explorer-tree-details[data-template-block-id]"
+      )
+    ) {
+      details.ontoggle = () => {
+        const blockId = details.dataset.templateBlockId;
+
+        if (!blockId) {
+          return;
+        }
+
+        if (details.open) {
+          this._openTemplateBlockIds.add(blockId);
+        } else {
+          this._openTemplateBlockIds.delete(blockId);
+        }
+      };
+    }
+
+    for (
+      const row of this.shadowRoot.querySelectorAll(
+        ".template-block-open"
+      )
+    ) {
+      row.onclick = () => {
+        const blockId = row.dataset.templateBlockId;
+
+        if (blockId) {
+          this._selectTemplateBlock(blockId);
+        }
+      };
+    }
+
+    for (
+      const summary of this.shadowRoot.querySelectorAll(
+        ".template-block-summary"
+      )
+    ) {
+      summary.onclick = (event) => {
+        if (!event.target.closest(".explorer-tree-content")) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const blockId = summary.dataset.templateBlockId;
+
+        if (blockId) {
+          this._selectTemplateBlock(blockId);
+        }
+      };
+    }
+
+    for (
+      const row of this.shadowRoot.querySelectorAll(
+        ".template-entity-row"
+      )
+    ) {
+      row.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const blockId = row.dataset.templateBlockId;
+        const entityId = row.dataset.templateEntityId;
+
+        if (blockId) {
+          this._selectTemplateBlock(
+            blockId,
+            entityId || null
+          );
+        }
+      };
     }
   }
 

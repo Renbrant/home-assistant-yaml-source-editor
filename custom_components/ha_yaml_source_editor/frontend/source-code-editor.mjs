@@ -33,8 +33,15 @@ export function createSourceCodeEditor({
   doc,
   onChange,
   onStatusChange,
+  readOnly = false,
 }) {
-  return new SourceCodeEditor({ parent, doc, onChange, onStatusChange });
+  return new SourceCodeEditor({
+    parent,
+    doc,
+    onChange,
+    onStatusChange,
+    readOnly,
+  });
 }
 
 export function editorStatusFromText(text, position = 0) {
@@ -96,10 +103,17 @@ export function shouldRestoreEditorFocusSnapshot(
 }
 
 class SourceCodeEditor {
-  constructor({ parent, doc, onChange, onStatusChange }) {
+  constructor({
+    parent,
+    doc,
+    onChange,
+    onStatusChange,
+    readOnly = false,
+  }) {
     this._onChange = onChange;
     this._onStatusChange = onStatusChange;
     this._programmaticUpdate = false;
+    this._readOnly = Boolean(readOnly);
     this._extensions = this._createExtensions();
 
     this.view = new EditorView({
@@ -115,6 +129,8 @@ class SourceCodeEditor {
 
   _createExtensions() {
     return [
+      EditorState.readOnly.of(this._readOnly),
+      EditorView.editable.of(!this._readOnly),
       lineNumbers(),
       highlightActiveLineGutter(),
       foldGutter(),
@@ -188,6 +204,31 @@ class SourceCodeEditor {
 
   getText() {
     return this.view.state.doc.toString();
+  }
+
+  isReadOnly() {
+    return this._readOnly;
+  }
+
+  revealLine(lineNumber) {
+    const safeLine = Math.max(
+      1,
+      Math.min(
+        Number.isFinite(lineNumber) ? Math.trunc(lineNumber) : 1,
+        this.view.state.doc.lines
+      )
+    );
+
+    const line = this.view.state.doc.line(safeLine);
+
+    this.view.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, {
+        y: "center",
+      }),
+    });
+
+    this._emitStatus(this.view.state);
   }
 
   status() {

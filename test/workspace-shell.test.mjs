@@ -220,6 +220,135 @@ test("Explorer refresh reloads both dashboards and Template index", async () => 
     /this\._loadTemplateIndex\(\{\s*force:\s*true\s*\}\)/
   );
 });
+test("Template Explorer reads blocks using backend-authoritative snapshot identity", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+
+  assert.match(
+    selectTemplate,
+    /type: "ha_yaml_source_editor\/templates\/block\/get"/
+  );
+  assert.match(
+    selectTemplate,
+    /block_id: blockId/
+  );
+  assert.match(
+    selectTemplate,
+    /expected_source_sha256: sourceSha256/
+  );
+
+  assert.doesNotMatch(
+    selectTemplate,
+    /source_path:|relative_path:|start_line:|end_line:/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._clearSelectedDashboard\(\)/
+  );
+  assert.match(
+    selectTemplate,
+    /this\._revealSelectedTemplateEntity\(\)/
+  );
+});
+
+test("Template target uses a distinct read-only CodeMirror document mode", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const attachEditor = methodBody(panel, "_attachSourceEditor()");
+  const activeDocument = methodBody(
+    panel,
+    "_activeEditorDocument()"
+  );
+  const templateSection = methodBody(
+    panel,
+    "_renderTemplateBlockSection()"
+  );
+
+  assert.match(
+    activeDocument,
+    /templateBlockDocumentId/
+  );
+  assert.match(
+    activeDocument,
+    /readOnly: true/
+  );
+  assert.match(
+    activeDocument,
+    /readOnly: false/
+  );
+
+  assert.match(
+    attachEditor,
+    /readOnly,/
+  );
+  assert.match(
+    attachEditor,
+    /onChange: readOnly[\s\S]+undefined/
+  );
+
+  assert.match(
+    templateSection,
+    /preview is read-only/
+  );
+  assert.doesNotMatch(
+    templateSection,
+    /Save Source|Compare|Deploy|Initialize from HA/
+  );
+});
+
+test("Template child navigation preserves Explorer expansion and remains non-fatal", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+  const revealEntity = methodBody(
+    panel,
+    "_revealSelectedTemplateEntity()"
+  );
+  const wireTree = methodBody(
+    panel,
+    "_wireTemplateTreeHandlers()"
+  );
+
+  assert.match(
+    panel,
+    /this\._openTemplateBlockIds = new Set\(\)/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._openTemplateBlockIds\.add\(blockId\)/
+  );
+
+  assert.match(
+    panel,
+    /this\._openTemplateBlockIds\.has\(block\.block_id\)[\s\S]+open/
+  );
+
+  assert.match(
+    wireTree,
+    /details\.ontoggle/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateBlockIds\.add\(blockId\)/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateBlockIds\.delete\(blockId\)/
+  );
+
+  assert.match(
+    revealEntity,
+    /typeof this\._sourceEditor\.revealLine === "function"/
+  );
+});
 test("Editor header owns dashboard context and labeled source statuses", async () => {
   const panel = await readFile(panelPath, "utf8");
   const appHeader = panel.match(
@@ -381,7 +510,7 @@ test("document switches still reset document-specific editor state", async () =>
 
   assert.match(selectDashboard, /this\._destroySourceEditor\(\)/);
   assert.match(attachSourceEditor, /if \(this\._sourceEditorDocumentId !== documentId\)/);
-  assert.match(attachSourceEditor, /this\._replaceSourceEditorText\(this\._sourceText, documentId,[\s\S]+resetHistory: true/);
+  assert.match(attachSourceEditor, /this\._replaceSourceEditorText\([\s\S]+text,[\s\S]+documentId,[\s\S]+resetHistory: true/);
 });
 
 function methodBody(source, signature) {
