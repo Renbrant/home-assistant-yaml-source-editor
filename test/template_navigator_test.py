@@ -14,9 +14,12 @@ PACKAGE_PATH = ROOT / "custom_components" / "ha_yaml_source_editor"
 sys.path.insert(0, str(PACKAGE_PATH))
 
 from template_navigator import (  # noqa: E402
+    TemplateBlockNotFoundError,
+    TemplateSourceChangedError,
     TemplateSourcePathError,
     build_template_index,
     find_simple_template_include,
+    get_template_block,
     index_template_text,
     resolve_config_path,
 )
@@ -237,6 +240,133 @@ class TemplateNavigatorTest(unittest.TestCase):
                 entity["edit_end_line"],
                 block["end_line"],
             )
+    def test_get_template_block_returns_exact_raw_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            configuration = (
+                "default_config:\r\n"
+                "template: !include templates.yaml\r\n"
+            )
+
+            templates = (
+                "# ============================================================\r\n"
+                "# HOUSE\r\n"
+                "# ============================================================\r\n"
+                "\r\n"
+                "- sensor:\r\n"
+                "    - name: \"House Power\"\r\n"
+                "      unique_id: house_power\r\n"
+                "      state: >\r\n"
+                "        {{ 1234 }}\r\n"
+                "\r\n"
+                "# ============================================================\r\n"
+                "# COMFORT\r\n"
+                "# ============================================================\r\n"
+                "\r\n"
+                "- sensor:\r\n"
+                "    - name: \"Comfort Temp\"\r\n"
+                "      unique_id: comfort_temp\r\n"
+                "      state: \"{{ 72 }}\"\r\n"
+            )
+
+            (root / "configuration.yaml").write_bytes(
+                configuration.encode("utf-8")
+            )
+            (root / "templates.yaml").write_bytes(
+                templates.encode("utf-8")
+            )
+
+            index = build_template_index(root)
+            source_sha256 = index["source"]["sha256"]
+            house = index["blocks"][0]
+
+            result = get_template_block(
+                root,
+                house["block_id"],
+                source_sha256,
+            )
+
+            self.assertEqual(
+                result["source"]["sha256"],
+                source_sha256,
+            )
+            self.assertEqual(
+                result["block"]["block_id"],
+                house["block_id"],
+            )
+            self.assertEqual(
+                result["block_text"],
+                (
+                    "- sensor:\r\n"
+                    "    - name: \"House Power\"\r\n"
+                    "      unique_id: house_power\r\n"
+                    "      state: >\r\n"
+                    "        {{ 1234 }}\r\n"
+                ),
+            )
+
+            self.assertNotIn(
+                "# COMFORT",
+                result["block_text"],
+            )
+
+    def test_get_template_block_rejects_stale_source_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+            (root / "templates.yaml").write_text(
+                (
+                    "# TEST\n"
+                    "- sensor:\n"
+                    "    - name: First\n"
+                    "      unique_id: first\n"
+                    "      state: \"{{ 1 }}\"\n"
+                ),
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+            block_id = index["blocks"][0]["block_id"]
+
+            with self.assertRaises(TemplateSourceChangedError):
+                get_template_block(
+                    root,
+                    block_id,
+                    "0" * 64,
+                )
+
+    def test_get_template_block_rejects_unknown_block_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+            (root / "templates.yaml").write_text(
+                (
+                    "# TEST\n"
+                    "- sensor:\n"
+                    "    - name: First\n"
+                    "      unique_id: first\n"
+                    "      state: \"{{ 1 }}\"\n"
+                ),
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+
+            with self.assertRaises(TemplateBlockNotFoundError):
+                get_template_block(
+                    root,
+                    "block:not-real",
+                    index["source"]["sha256"],
+                )
     def test_builds_index_without_rewriting_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

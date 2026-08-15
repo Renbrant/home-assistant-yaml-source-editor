@@ -25,6 +25,7 @@ WS_TYPE_DOCUMENTS_RECORD_DEPLOYMENT = f"{DOMAIN}/documents/record_deployment"
 WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION = f"{DOMAIN}/documents/import_ha_version"
 WS_TYPE_HASH_SHA256 = f"{DOMAIN}/hash/sha256"
 WS_TYPE_TEMPLATES_INDEX = f"{DOMAIN}/templates/index"
+WS_TYPE_TEMPLATES_BLOCK_GET = f"{DOMAIN}/templates/block/get"
 
 DOCUMENT_STORAGE_KEY = f"{DOMAIN}.documents"
 DOCUMENT_STORAGE_VERSION = 1

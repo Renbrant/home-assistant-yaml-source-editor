@@ -27,6 +27,7 @@ from .const import (
     WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
     WS_TYPE_TEMPLATES_INDEX,
+    WS_TYPE_TEMPLATES_BLOCK_GET,
 )
 from .document_store import (
     DocumentAlreadyExistsError,
@@ -39,7 +40,13 @@ from .document_store import (
     SourceTextTooLargeError,
 )
 from .hashing import sha256_text
-from .template_navigator import TemplateSourceError, build_template_index
+from .template_navigator import (
+    TemplateBlockNotFoundError,
+    TemplateSourceChangedError,
+    TemplateSourceError,
+    build_template_index,
+    get_template_block,
+)
 
 
 def async_register_commands(hass: HomeAssistant) -> None:
@@ -53,6 +60,8 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_import_ha_version)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
     websocket_api.async_register_command(hass, websocket_templates_index)
+    websocket_api.async_register_command(hass, websocket_templates_block_get)
+
 
 
 def _document_store(hass: HomeAssistant) -> SourceDocumentStore:
@@ -321,6 +330,57 @@ async def websocket_documents_import_ha_version(
         return
 
     connection.send_result(msg["id"], {"document": document})
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_BLOCK_GET,
+        vol.Required("block_id"): vol.All(
+            str,
+            vol.Length(min=1, max=128),
+        ),
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_block_get(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return one exact raw Template block from the indexed Source snapshot."""
+    try:
+        result = await hass.async_add_executor_job(
+            get_template_block,
+            Path(hass.config.config_dir),
+            msg["block_id"],
+            msg["expected_source_sha256"],
+        )
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateBlockNotFoundError as err:
+        connection.send_error(
+            msg["id"],
+            "template_block_not_found",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(msg["id"], result)
 
 @websocket_api.require_admin
 @websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TEMPLATES_INDEX})

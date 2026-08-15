@@ -54,6 +54,13 @@ class TemplateSourcePathError(TemplateSourceError):
 class TemplateSourceTooLargeError(TemplateSourceError):
     """Raised when a Template Source exceeds the supported size limit."""
 
+class TemplateBlockNotFoundError(TemplateSourceError):
+    """Raised when a requested Template block is not in the current index."""
+
+
+class TemplateSourceChangedError(TemplateSourceError):
+    """Raised when the Template Source changed after Explorer indexing."""
+
 
 def build_template_index(config_dir: str | Path) -> dict[str, Any]:
     """Discover and index the primary YAML Template Source.
@@ -124,6 +131,93 @@ def build_template_index(config_dir: str | Path) -> dict[str, Any]:
         "blocks": blocks,
     }
 
+
+def get_template_block(
+    config_dir: str | Path,
+    block_id: str,
+    expected_source_sha256: str,
+) -> dict[str, Any]:
+    """Return one exact raw top-level Template block from the current source.
+
+    The caller identifies a block only within the exact Source snapshot
+    represented by expected_source_sha256. The backend rediscovers and
+    reindexes the configured Template Source before returning any raw text.
+    """
+    root = Path(config_dir).resolve()
+    result = build_template_index(root)
+
+    if not result.get("available"):
+        raise TemplateSourceError(
+            result.get("message")
+            or "No supported YAML Template Source is currently available."
+        )
+
+    source = result["source"]
+    current_sha256 = source["sha256"]
+
+    if current_sha256 != expected_source_sha256:
+        raise TemplateSourceChangedError(
+            "Template Source changed after Explorer indexing. Refresh and try again."
+        )
+
+    block = next(
+        (
+            candidate
+            for candidate in result.get("blocks", [])
+            if candidate.get("block_id") == block_id
+        ),
+        None,
+    )
+
+    if block is None:
+        raise TemplateBlockNotFoundError(
+            "Template block was not found in the current Source index."
+        )
+
+    # Never trust a caller-supplied path or line range. Resolve the Source
+    # again from backend discovery metadata and verify its bytes still match
+    # the same snapshot before slicing.
+    source_path = resolve_config_path(
+        root,
+        source["relative_path"],
+    )
+    source_text, source_bytes = _read_utf8_file(source_path)
+    verified_sha256 = hashlib.sha256(source_bytes).hexdigest()
+
+    if (
+        verified_sha256 != current_sha256
+        or verified_sha256 != expected_source_sha256
+    ):
+        raise TemplateSourceChangedError(
+            "Template Source changed while the block was being read. Refresh and try again."
+        )
+
+    lines = source_text.splitlines(keepends=True)
+    start_index = block["start_line"] - 1
+    end_index = block["end_line"]
+
+    if (
+        start_index < 0
+        or end_index <= start_index
+        or end_index > len(lines)
+    ):
+        raise TemplateSourceError(
+            "Template block range is invalid for the current Source."
+        )
+
+    block_text = "".join(lines[start_index:end_index])
+
+    return {
+        "source": {
+            "path": source["path"],
+            "relative_path": source["relative_path"],
+            "size_bytes": source["size_bytes"],
+            "sha256": verified_sha256,
+            "line_count": source["line_count"],
+        },
+        "block": block,
+        "block_text": block_text,
+    }
 
 def find_simple_template_include(configuration_text: str) -> str | None:
     """Return the path from a simple top-level template !include declaration."""
