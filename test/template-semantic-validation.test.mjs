@@ -241,3 +241,57 @@ test("Template save WebSocket constant and registration are present", async () =
     /async_register_command\(hass, websocket_templates_block_save\)/,
   );
 });
+
+test("Template save WebSocket distinguishes uncertain post-commit state", async () => {
+  const source = await readFile(websocketPath, "utf8");
+
+  const functionStart = source.indexOf(
+    "async def websocket_templates_block_save("
+  );
+
+  assert.notEqual(
+    functionStart,
+    -1,
+    "Missing Template save WebSocket",
+  );
+
+  const decoratorStart = source.lastIndexOf(
+    "@websocket_api.require_admin",
+    functionStart,
+  );
+
+  const nextCommand = source.indexOf(
+    "@websocket_api.require_admin",
+    functionStart + 1,
+  );
+
+  const endpoint = source.slice(
+    decoratorStart,
+    nextCommand === -1 ? source.length : nextCommand,
+  );
+
+  assert.match(
+    endpoint,
+    /except TemplateSourceCommitUncertainError as err:/,
+  );
+
+  assert.match(
+    endpoint,
+    /"template_commit_uncertain"/,
+  );
+
+  const uncertainIndex = endpoint.indexOf(
+    "except TemplateSourceCommitUncertainError"
+  );
+
+  const writeErrorIndex = endpoint.indexOf(
+    "except TemplateSourceWriteError"
+  );
+
+  assert.ok(
+    uncertainIndex !== -1 &&
+      writeErrorIndex !== -1 &&
+      uncertainIndex < writeErrorIndex,
+    "Commit uncertainty must be mapped distinctly before normal write errors",
+  );
+});

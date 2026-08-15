@@ -45,6 +45,7 @@ from .hashing import sha256_text
 from .template_navigator import (
     TemplateBlockNotFoundError,
     TemplateSourceChangedError,
+    TemplateSourceCommitUncertainError,
     TemplateSourceError,
     TemplateSourceTooLargeError,
     TemplateSourceValidationError,
@@ -570,6 +571,13 @@ async def websocket_templates_block_save(
         connection.send_error(
             msg["id"],
             "template_semantic_invalid",
+            str(err),
+        )
+        return
+    except TemplateSourceCommitUncertainError as err:
+        connection.send_error(
+            msg["id"],
+            "template_commit_uncertain",
             str(err),
         )
         return

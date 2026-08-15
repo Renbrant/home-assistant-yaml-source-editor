@@ -80,6 +80,10 @@ class TemplateSourceWriteError(TemplateSourceError):
     """Raised when a targeted Template Source write cannot be completed safely."""
 
 
+class TemplateSourceCommitUncertainError(TemplateSourceError):
+    """Raised when replacement occurred but verification could not finish."""
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedTemplateBlockSave:
     """Immutable candidate produced before semantic validation."""
@@ -630,29 +634,48 @@ def _commit_prepared_template_block_save_locked(
         prepared.source_mode,
     )
 
-    readback_text, readback_bytes = _read_utf8_file(
-        current_source_path
-    )
+    # os.replace() has completed at this point. Any failure from here onward
+    # must not be reported as a normal pre-commit write failure because the
+    # physical Source may already contain the proposed bytes.
+    try:
+        readback_text, readback_bytes = _read_utf8_file(
+            current_source_path
+        )
+    except (OSError, TemplateSourceError) as err:
+        raise TemplateSourceCommitUncertainError(
+            "Template Source was replaced, but read-back verification "
+            "could not be completed. Refresh the Template Source and "
+            "reconcile its current state before saving again."
+        ) from err
 
     if readback_bytes != prepared.proposed_bytes:
-        raise TemplateSourceChangedError(
-            "Template Source changed immediately after the targeted save."
+        raise TemplateSourceCommitUncertainError(
+            "Template Source was replaced, but the subsequent read-back "
+            "does not match the committed candidate. Refresh the Template "
+            "Source and reconcile its current state before saving again."
         )
 
     new_sha256 = hashlib.sha256(
         readback_bytes
     ).hexdigest()
 
-    # Validate once more from the exact bytes read back from disk.
-    _validate_complete_template_yaml(
-        readback_text
-    )
+    try:
+        # Validate once more from the exact bytes read back from disk.
+        _validate_complete_template_yaml(
+            readback_text
+        )
 
-    result = get_template_block(
-        root,
-        prepared.block_id,
-        new_sha256,
-    )
+        result = get_template_block(
+            root,
+            prepared.block_id,
+            new_sha256,
+        )
+    except TemplateSourceError as err:
+        raise TemplateSourceCommitUncertainError(
+            "Template Source was replaced, but post-commit verification "
+            "could not be completed. Refresh the Template Source and "
+            "reconcile its current state before saving again."
+        ) from err
 
     result["changed"] = True
     result["previous_source_sha256"] = (
@@ -834,17 +857,19 @@ def _fsync_parent_directory(directory: Path) -> None:
     try:
         directory_fd = os.open(directory, flags)
     except OSError as err:
-        raise TemplateSourceWriteError(
+        raise TemplateSourceCommitUncertainError(
             "Template Source was replaced, but its parent directory "
-            "could not be opened for durability verification."
+            "could not be opened for durability verification. Refresh "
+            "the Template Source and reconcile its current state."
         ) from err
 
     try:
         os.fsync(directory_fd)
     except OSError as err:
-        raise TemplateSourceWriteError(
+        raise TemplateSourceCommitUncertainError(
             "Template Source was replaced, but its parent directory "
-            "could not be synchronized."
+            "could not be synchronized. Refresh the Template Source "
+            "and reconcile its current state."
         ) from err
     finally:
         try:

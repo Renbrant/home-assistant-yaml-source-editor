@@ -19,6 +19,7 @@ from template_navigator import (  # noqa: E402
     _atomic_replace_bytes,
     _fsync_parent_directory,
     TemplateSourceChangedError,
+    TemplateSourceCommitUncertainError,
     TemplateSourcePathError,
     TemplateSourceTooLargeError,
     TemplateSourceValidationError,
@@ -1178,7 +1179,7 @@ class TemplateNavigatorTest(unittest.TestCase):
                 index["source"]["sha256"],
             )
 
-    def test_readback_mismatch_after_commit_is_reported(self) -> None:
+    def test_readback_mismatch_after_commit_is_commit_uncertain(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
 
@@ -1230,7 +1231,7 @@ class TemplateNavigatorTest(unittest.TestCase):
                 side_effect=simulate_post_commit_change,
             ):
                 with self.assertRaises(
-                    TemplateSourceChangedError
+                    TemplateSourceCommitUncertainError
                 ):
                     save_template_block(
                         root,
@@ -1306,6 +1307,52 @@ class TemplateNavigatorTest(unittest.TestCase):
             open_directory.assert_called_once()
             fsync.assert_called_once_with(123)
             close.assert_called_once_with(123)
+
+    def test_post_replace_directory_sync_failure_is_commit_uncertain(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "templates.yaml"
+
+            original = b"original\n"
+            proposed = b"proposed\n"
+
+            source_path.write_bytes(
+                original
+            )
+
+            source_mode = (
+                source_path.stat().st_mode
+                & 0o7777
+            )
+
+            with mock.patch(
+                "template_navigator._fsync_parent_directory",
+                side_effect=TemplateSourceCommitUncertainError(
+                    "simulated post-replace durability failure"
+                ),
+            ):
+                with self.assertRaises(
+                    TemplateSourceCommitUncertainError
+                ):
+                    _atomic_replace_bytes(
+                        source_path,
+                        proposed,
+                        hashlib.sha256(original).hexdigest(),
+                        source_mode,
+                    )
+
+            # The replacement already happened. This is exactly why the
+            # caller must receive an uncertainty result rather than a normal
+            # write failure that could imply the Source is unchanged.
+            self.assertEqual(
+                source_path.read_bytes(),
+                proposed,
+            )
+
+            self.assertEqual(
+                list(root.glob(".templates.yaml.*.tmp")),
+                [],
+            )
 
     def test_prepare_save_is_non_mutating_until_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
