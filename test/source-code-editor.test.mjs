@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  editorContentAttributes,
   editorStatusFromText,
   editorTextFromDocument,
   handleSourceEditorKeydown,
@@ -101,9 +102,22 @@ test("editor keydown isolation stops host propagation without claiming the key",
   }
 });
 
+test("read-only editor remains focusable for keyboard isolation", () => {
+  assert.deepEqual(
+    editorContentAttributes(true),
+    { tabindex: "0" }
+  );
+
+  assert.deepEqual(
+    editorContentAttributes(false),
+    {}
+  );
+});
+
 test("editor keydown handler uses CodeMirror event-view argument order", () => {
   let stopped = false;
   let viewStopCalled = false;
+
   const event = {
     key: "e",
     stopPropagation() {
@@ -113,10 +127,11 @@ test("editor keydown handler uses CodeMirror event-view argument order", () => {
       throw new Error("keydown isolation must not prevent default");
     },
   };
+
   const view = {
     stopPropagation() {
       viewStopCalled = true;
-      throw new Error("EditorView was used as the event");
+      throw new Error("EditorView was incorrectly treated as the event");
     },
   };
 

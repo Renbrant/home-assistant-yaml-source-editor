@@ -19,6 +19,16 @@ export function templateBlockDocumentId(result) {
   return `template:${sha256}:${blockId}`;
 }
 
+export function templateSourceDocumentId(result) {
+  const sha256 = result?.source?.sha256;
+
+  if (!sha256) {
+    return null;
+  }
+
+  return `template-source:${sha256}`;
+}
+
 export function templateEntityLocalLine(block, entityId) {
   const entity = findTemplateEntity(block, entityId);
 

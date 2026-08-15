@@ -7,6 +7,7 @@ import {
   findTemplateEntity,
   templateBlockDocumentId,
   templateEntityLocalLine,
+  templateSourceDocumentId,
 } from "../custom_components/ha_yaml_source_editor/frontend/template-source-logic.mjs";
 
 const index = {
@@ -63,6 +64,20 @@ test("template document identity binds block to source snapshot", () => {
   );
 
   assert.equal(templateBlockDocumentId({}), null);
+});
+
+test("full Template Source document identity binds to physical snapshot", () => {
+  assert.equal(
+    templateSourceDocumentId({
+      source: index.source,
+    }),
+    `template-source:${"a".repeat(64)}`
+  );
+
+  assert.equal(
+    templateSourceDocumentId({}),
+    null
+  );
 });
 
 test("entity physical line is translated to local block editor line", () => {

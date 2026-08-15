@@ -80,6 +80,12 @@ export function handleSourceEditorKeydown(event, _view) {
   return stopHostKeydownPropagation(event);
 }
 
+export function editorContentAttributes(readOnly) {
+  return readOnly
+    ? { tabindex: "0" }
+    : {};
+}
+
 export function shouldRestoreEditorViewportSnapshot(
   snapshot,
   { editor, documentId }
@@ -131,6 +137,9 @@ class SourceCodeEditor {
     return [
       EditorState.readOnly.of(this._readOnly),
       EditorView.editable.of(!this._readOnly),
+      EditorView.contentAttributes.of(
+        editorContentAttributes(this._readOnly)
+      ),
       lineNumbers(),
       highlightActiveLineGutter(),
       foldGutter(),

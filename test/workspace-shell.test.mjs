@@ -790,3 +790,209 @@ test("Template Save refreshes authoritative Explorer state after stale or uncert
     /Reopen the block/
   );
 });
+
+test("Template Source file opens complete snapshot using backend-authoritative SHA only", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const openFullSource = methodBody(
+    panel,
+    "async _openTemplateFullSource()"
+  );
+
+  const wireTree = methodBody(
+    panel,
+    "_wireTemplateTreeHandlers()"
+  );
+
+  const renderTree = methodBody(
+    panel,
+    "_renderTemplateTree()"
+  );
+
+  assert.match(
+    renderTree,
+    /template-source-summary/
+  );
+
+  assert.match(
+    renderTree,
+    /explorer-tree-badge">FULL/
+  );
+
+  assert.match(
+    wireTree,
+    /\.template-source-summary/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateFullSource\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._confirmDiscardUnsavedChanges\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._clearTemplateSelection\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._clearSelectedDashboard\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /type: "ha_yaml_source_editor\/templates\/source\/get"/
+  );
+
+  assert.match(
+    openFullSource,
+    /expected_source_sha256: sourceSha256/
+  );
+
+  assert.doesNotMatch(
+    openFullSource,
+    /source_path:|relative_path:|start_line:|end_line:/
+  );
+
+  assert.match(
+    openFullSource,
+    /err\?\.code === "template_source_changed"/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._loadTemplateIndex\(\{[\s\S]+force: true/
+  );
+});
+
+test("Full Template Source uses a distinct read-only CodeMirror document", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const activeDocument = methodBody(
+    panel,
+    "_activeEditorDocument()"
+  );
+
+  const fullSourceSection = methodBody(
+    panel,
+    "_renderTemplateFullSourceSection()"
+  );
+
+  assert.match(
+    activeDocument,
+    /this\._templateFullSourceStatus === "Loaded"/
+  );
+
+  assert.match(
+    activeDocument,
+    /templateSourceDocumentId/
+  );
+
+  assert.match(
+    activeDocument,
+    /text: this\._templateFullSourceResult\.source_text/
+  );
+
+  assert.match(
+    activeDocument,
+    /readOnly: true/
+  );
+
+  assert.match(
+    fullSourceSection,
+    /Read-only physical Source snapshot/
+  );
+
+  assert.match(
+    fullSourceSection,
+    /This view cannot be saved/
+  );
+
+  assert.doesNotMatch(
+    fullSourceSection,
+    /id="save-template-block"|Save Template/
+  );
+});
+
+test("Full Template Source renders as Template context without writable controls", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const editorRegion = methodBody(
+    panel,
+    "_renderEditorRegion()"
+  );
+
+  const editorTarget = methodBody(
+    panel,
+    "_renderEditorTargetContents()"
+  );
+
+  const editorSummary = methodBody(
+    panel,
+    "_renderEditorStateSummary()"
+  );
+
+  const inspectorPanel = methodBody(
+    panel,
+    "_renderInspectorPanel()"
+  );
+
+  assert.match(
+    editorRegion,
+    /fullTemplateSourceMode/
+  );
+
+  assert.match(
+    editorRegion,
+    /this\._renderTemplateFullSourceSection\(\)/
+  );
+
+  assert.match(
+    editorTarget,
+    /this\._templateFullSourceStatus !== "Idle"/
+  );
+
+  assert.match(
+    editorSummary,
+    /Mode: Read-only full source/
+  );
+
+  assert.match(
+    inspectorPanel,
+    /this\._renderTemplateFullSourceInspectorPanel\(\)/
+  );
+});
+
+test("Full Template Source cleanup invalidates in-flight reads and destroys deliberate document switches", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const clearSelection = methodBody(
+    panel,
+    "_clearTemplateSelection()"
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceStatus = "Idle"/
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceResult = null/
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceRequestId \+= 1/
+  );
+
+  assert.match(
+    clearSelection,
+    /if \(hadTemplateSelection\)[\s\S]+this\._destroySourceEditor\(\)/
+  );
+});

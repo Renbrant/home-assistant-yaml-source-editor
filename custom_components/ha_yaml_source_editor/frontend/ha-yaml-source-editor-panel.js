@@ -38,6 +38,7 @@ import {
   findTemplateEntity,
   templateBlockDocumentId,
   templateEntityLocalLine,
+  templateSourceDocumentId,
 } from "./template-source-logic.mjs";
 
 const MAX_DEPLOYMENT_SNAPSHOT_BYTES = 8 * 1024 * 1024;
@@ -73,6 +74,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._templateLoading = false;
     this._templateIndex = null;
     this._templateError = null;
+    this._templateFullSourceStatus = "Idle";
+    this._templateFullSourceResult = null;
+    this._templateFullSourceError = null;
+    this._templateFullSourceRequestId = 0;
     this._selectedTemplateBlockId = null;
     this._selectedTemplateEntityId = null;
     this._templateBlockStatus = "Idle";
@@ -571,6 +576,25 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _activeEditorDocument() {
     if (
+      this._templateFullSourceStatus === "Loaded" &&
+      this._templateFullSourceResult
+    ) {
+      const documentId = templateSourceDocumentId(
+        this._templateFullSourceResult
+      );
+
+      if (!documentId) {
+        return null;
+      }
+
+      return {
+        documentId,
+        text: this._templateFullSourceResult.source_text ?? "",
+        readOnly: true,
+      };
+    }
+
+    if (
       this._selectedTemplateBlockId &&
       this._templateBlockStatus === "Loaded" &&
       this._templateBlockResult
@@ -851,7 +875,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     }
 
     const editorState =
-      this._selectedTemplateBlockId
+      this._templateFullSourceStatus !== "Idle"
+        ? this._templateFullSourceStatus === "Loaded"
+          ? "Read-only"
+          : this._templateFullSourceStatus
+        : this._selectedTemplateBlockId
         ? this._templateSaveStatus === "Saving"
           ? "Saving"
           : this._templateSaveStatus === "Uncertain"
@@ -1070,8 +1098,15 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
   _clearTemplateSelection() {
     const hadTemplateSelection =
+      this._templateFullSourceStatus !== "Idle" ||
+      this._templateFullSourceResult !== null ||
       this._selectedTemplateBlockId !== null ||
       this._templateBlockResult !== null;
+
+    this._templateFullSourceStatus = "Idle";
+    this._templateFullSourceResult = null;
+    this._templateFullSourceError = null;
+    this._templateFullSourceRequestId += 1;
 
     this._selectedTemplateBlockId = null;
     this._selectedTemplateEntityId = null;
@@ -1087,6 +1122,102 @@ class HaYamlSourceEditorPanel extends HTMLElement {
 
     if (hadTemplateSelection) {
       this._destroySourceEditor();
+    }
+  }
+
+
+  async _openTemplateFullSource() {
+    if (this._isDeploymentInProgress()) {
+      this._deploymentMessage = "Deployment is in progress.";
+      this._render();
+      return;
+    }
+
+    if (this._isResolutionInProgress()) {
+      this._resolutionMessage = "Conflict resolution is in progress.";
+      this._render();
+      return;
+    }
+
+    if (!this._confirmDiscardUnsavedChanges()) {
+      return;
+    }
+
+    const sourceSha256 =
+      this._templateIndex?.source?.sha256;
+
+    this._clearTemplateSelection();
+    this._clearSelectedDashboard();
+
+    const requestId =
+      this._templateFullSourceRequestId + 1;
+
+    this._templateFullSourceRequestId = requestId;
+    this._templateFullSourceResult = null;
+    this._templateFullSourceError = null;
+
+    if (!sourceSha256) {
+      this._templateFullSourceStatus = "Error";
+      this._templateFullSourceError =
+        "Template Source snapshot is unavailable. Refresh Explorer and try again.";
+      this._render();
+      return;
+    }
+
+    this._templateFullSourceStatus = "Loading";
+    this._render();
+
+    try {
+      const result =
+        await this._hass.connection.sendMessagePromise({
+          type: "ha_yaml_source_editor/templates/source/get",
+          expected_source_sha256: sourceSha256,
+        });
+
+      if (
+        requestId !==
+        this._templateFullSourceRequestId
+      ) {
+        return;
+      }
+
+      this._templateFullSourceResult = result;
+      this._templateFullSourceStatus = "Loaded";
+      this._templateFullSourceError = null;
+
+      this._render();
+    } catch (err) {
+      if (
+        requestId !==
+        this._templateFullSourceRequestId
+      ) {
+        return;
+      }
+
+      if (err?.code === "template_source_changed") {
+        this._templateFullSourceStatus = "Stale";
+        this._templateFullSourceError =
+          "Template Source changed after Explorer indexing. Explorer was refreshed; open the full Source again.";
+
+        await this._loadTemplateIndex({
+          force: true,
+        });
+
+        if (
+          requestId !==
+          this._templateFullSourceRequestId
+        ) {
+          return;
+        }
+      } else {
+        this._templateFullSourceStatus = "Error";
+        this._templateFullSourceError =
+          err?.message ||
+          "Unable to read the full Template Source.";
+      }
+
+      this._templateFullSourceResult = null;
+      this._render();
     }
   }
 
@@ -2855,11 +2986,16 @@ class HaYamlSourceEditorPanel extends HTMLElement {
       .filter(Boolean)
       .join(" · ");
 
+    const fullSourceSelectedClass =
+      this._templateFullSourceStatus !== "Idle"
+        ? " selected"
+        : "";
+
     return `
       <ul class="template-tree explorer-tree">
         <li class="template-file-node">
           <details class="explorer-tree-details" open>
-            <summary class="explorer-tree-row explorer-tree-summary">
+            <summary class="explorer-tree-row explorer-tree-summary template-source-summary${fullSourceSelectedClass}">
               <span class="explorer-tree-icon file-icon" aria-hidden="true">Y</span>
               <span class="explorer-tree-content">
                 <span class="explorer-tree-label">${this._escapeHtml(
@@ -2873,6 +3009,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
                     : ""
                 }
               </span>
+              <span class="explorer-tree-badge">FULL</span>
             </summary>
 
             <ul class="explorer-tree explorer-tree-children">
@@ -3179,6 +3316,125 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           <div id="source-editor-status" class="source-editor-status"></div>
         </div>
       </div>
+    `;
+  }
+
+
+  _renderTemplateFullSourceSection() {
+    if (this._templateFullSourceStatus === "Idle") {
+      return "";
+    }
+
+    if (this._templateFullSourceStatus === "Loading") {
+      return `
+        <section class="section">
+          <h2>Full Template Source</h2>
+          <p class="state">
+            Loading the complete physical Template Source snapshot...
+          </p>
+        </section>
+      `;
+    }
+
+    if (
+      this._templateFullSourceStatus === "Error" ||
+      this._templateFullSourceStatus === "Stale"
+    ) {
+      return `
+        <section class="section">
+          <h2>Full Template Source</h2>
+          <p class="state error">${this._escapeHtml(
+            this._templateFullSourceError ||
+              "Unable to load the full Template Source."
+          )}</p>
+          <p class="state">
+            Refresh Explorer and open the physical Source again before
+            continuing.
+          </p>
+        </section>
+      `;
+    }
+
+    if (
+      this._templateFullSourceStatus !== "Loaded" ||
+      !this._templateFullSourceResult
+    ) {
+      return "";
+    }
+
+    const source =
+      this._templateFullSourceResult.source ?? {};
+
+    return `
+      <section class="section">
+        <h2>Full Template Source</h2>
+
+        <dl class="source-status template-source-status">
+          <dt>Source</dt>
+          <dd>${this._escapeHtml(
+            source.path ?? "-"
+          )}</dd>
+
+          <dt>Mode</dt>
+          <dd>Read-only physical Source snapshot</dd>
+
+          <dt>Snapshot</dt>
+          <dd title="${this._escapeHtml(
+            source.sha256 ?? ""
+          )}">${this._escapeHtml(
+            shortHash(source.sha256)
+          )}</dd>
+
+          <dt>Physical size</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.size_bytes)
+              ? `${source.size_bytes} bytes`
+              : "-"
+          )}</dd>
+
+          <dt>Lines</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.line_count)
+              ? source.line_count
+              : "-"
+          )}</dd>
+
+          <dt>Indexed blocks</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.block_count)
+              ? source.block_count
+              : "-"
+          )}</dd>
+
+          <dt>Indexed Templates</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.entity_count)
+              ? source.entity_count
+              : "-"
+          )}</dd>
+        </dl>
+
+        <div class="source-editor">
+          <label for="source-code-editor-host">
+            Complete Template YAML
+          </label>
+
+          <p class="state">
+            Read-only view of the complete configured physical Template
+            Source. This view cannot be saved. To edit YAML, select an
+            indexed top-level Template block in Explorer. Only complete
+            top-level blocks are writable.
+          </p>
+
+          <div class="source-code-editor-shell">
+            <div id="source-code-editor-host"></div>
+            <div
+              id="source-editor-status"
+              class="source-editor-status"
+            ></div>
+          </div>
+        </div>
+      </section>
     `;
   }
 
@@ -3786,6 +4042,29 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _renderEditorTargetContents() {
+    if (this._templateFullSourceStatus !== "Idle") {
+      const source =
+        this._templateFullSourceResult?.source ??
+        this._templateIndex?.source ??
+        {};
+
+      const label =
+        source.relative_path ||
+        source.path ||
+        "Template Source";
+
+      return `
+        <span>${this._escapeHtml(label)}</span>
+        ${
+          source.path
+            ? `<span class="editor-target-path">${this._escapeHtml(
+                source.path
+              )}</span>`
+            : ""
+        }
+      `;
+    }
+
     if (this._selectedTemplateBlockId) {
       const block =
         this._templateBlockResult?.block ??
@@ -3856,6 +4135,28 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _renderEditorStateSummary() {
+    if (this._templateFullSourceStatus !== "Idle") {
+      const sha256 =
+        this._templateFullSourceResult?.source?.sha256 ??
+        this._templateIndex?.source?.sha256 ??
+        "";
+
+      const shortSnapshot =
+        sha256.length >= 12
+          ? sha256.slice(0, 12)
+          : sha256 || "Unavailable";
+
+      return `
+        <span>Template: ${this._escapeHtml(
+          this._templateFullSourceStatus
+        )}</span>
+        <span>Mode: Read-only full source</span>
+        <span>Snapshot: ${this._escapeHtml(
+          shortSnapshot
+        )}</span>
+      `;
+    }
+
     if (this._selectedTemplateBlockId) {
       const sha256 =
         this._templateBlockResult?.source?.sha256 ??
@@ -4066,6 +4367,71 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     `;
   }
 
+
+  _renderTemplateFullSourceInspectorPanel() {
+    const source =
+      this._templateFullSourceResult?.source ??
+      this._templateIndex?.source ??
+      {};
+
+    return `
+      <section class="section first-section">
+        <h2>Template Source</h2>
+
+        <dl class="inspector-summary">
+          <dt>Status</dt>
+          <dd>${this._escapeHtml(
+            this._templateFullSourceStatus
+          )}</dd>
+
+          <dt>Mode</dt>
+          <dd>Read-only full physical Source</dd>
+
+          <dt>Source</dt>
+          <dd>${this._escapeHtml(
+            source.path ?? "-"
+          )}</dd>
+
+          <dt>Snapshot</dt>
+          <dd title="${this._escapeHtml(
+            source.sha256 ?? ""
+          )}">${this._escapeHtml(
+            shortHash(source.sha256)
+          )}</dd>
+
+          <dt>Lines</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.line_count)
+              ? source.line_count
+              : "-"
+          )}</dd>
+
+          <dt>Blocks</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.block_count)
+              ? source.block_count
+              : "-"
+          )}</dd>
+
+          <dt>Templates</dt>
+          <dd>${this._escapeHtml(
+            Number.isFinite(source.entity_count)
+              ? source.entity_count
+              : "-"
+          )}</dd>
+        </dl>
+
+        ${
+          this._templateFullSourceError
+            ? `<p class="state error">${this._escapeHtml(
+                this._templateFullSourceError
+              )}</p>`
+            : ""
+        }
+      </section>
+    `;
+  }
+
   _renderTemplateInspectorPanel() {
     const block =
       this._templateBlockResult?.block ??
@@ -4140,6 +4506,10 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _renderInspectorPanel() {
+    if (this._templateFullSourceStatus !== "Idle") {
+      return this._renderTemplateFullSourceInspectorPanel();
+    }
+
     if (this._selectedTemplateBlockId) {
       return this._renderTemplateInspectorPanel();
     }
@@ -4276,7 +4646,11 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _renderEditorRegion() {
+    const fullTemplateSourceMode =
+      this._templateFullSourceStatus !== "Idle";
+
     const templateMode =
+      fullTemplateSourceMode ||
       this._selectedTemplateBlockId !== null;
 
     return `
@@ -4284,19 +4658,27 @@ class HaYamlSourceEditorPanel extends HTMLElement {
         <div class="region-header">
           <div>
             <div class="region-kicker">Editor</div>
-            <h2>${templateMode ? "Template YAML" : "Source YAML"}</h2>
+            <h2>${
+              fullTemplateSourceMode
+                ? "Full Template Source"
+                : templateMode
+                  ? "Template YAML"
+                  : "Source YAML"
+            }</h2>
           </div>
         </div>
 
         ${this._renderEditorContext()}
 
         ${
-          templateMode
-            ? this._renderTemplateBlockSection()
-            : `
-                ${this._renderCommandBar()}
-                ${this._renderSourceDocumentSection()}
-              `
+          fullTemplateSourceMode
+            ? this._renderTemplateFullSourceSection()
+            : templateMode
+              ? this._renderTemplateBlockSection()
+              : `
+                  ${this._renderCommandBar()}
+                  ${this._renderSourceDocumentSection()}
+                `
         }
       </main>
     `;
@@ -4859,6 +5241,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           background: var(--secondary-background-color);
         }
 
+        .template-source-summary .explorer-tree-content,
         .template-block-open,
         .template-block-summary .explorer-tree-content,
         .template-entity-row {
@@ -5525,6 +5908,23 @@ class HaYamlSourceEditorPanel extends HTMLElement {
   }
 
   _wireTemplateTreeHandlers() {
+    for (
+      const summary of this.shadowRoot.querySelectorAll(
+        ".template-source-summary"
+      )
+    ) {
+      summary.onclick = (event) => {
+        if (!event.target.closest(".explorer-tree-content")) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        this._openTemplateFullSource();
+      };
+    }
+
     for (
       const details of this.shadowRoot.querySelectorAll(
         ".explorer-tree-details[data-template-block-id]"
