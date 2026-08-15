@@ -17,8 +17,10 @@ sys.path.insert(0, str(PACKAGE_PATH))
 from template_navigator import (  # noqa: E402
     TemplateBlockNotFoundError,
     _atomic_replace_bytes,
+    _fsync_parent_directory,
     TemplateSourceChangedError,
     TemplateSourcePathError,
+    TemplateSourceTooLargeError,
     TemplateSourceValidationError,
     TemplateSourceWriteError,
     build_template_index,
@@ -841,6 +843,467 @@ class TemplateNavigatorTest(unittest.TestCase):
                 source_path.read_bytes(),
                 expected,
             )
+
+    def test_save_rejects_complete_source_over_limit_after_splice(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+                "- sensor:\n"
+                "    - name: Second\n"
+                "      unique_id: second\n"
+                "      state: \"{{ 2 }}\"\n"
+            )
+
+            source_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "template_navigator.MAX_TEMPLATE_SOURCE_BYTES",
+                300,
+            ):
+                index = build_template_index(root)
+
+                current = get_template_block(
+                    root,
+                    index["blocks"][0]["block_id"],
+                    index["source"]["sha256"],
+                )
+
+                replacement = current["block_text"].replace(
+                    "\"{{ 1 }}\"",
+                    '"' + ("x" * 180) + '"',
+                )
+
+                self.assertLess(
+                    len(replacement.encode("utf-8")),
+                    300,
+                )
+
+                proposed = original.replace(
+                    "\"{{ 1 }}\"",
+                    '"' + ("x" * 180) + '"',
+                    1,
+                )
+
+                self.assertGreater(
+                    len(proposed.encode("utf-8")),
+                    300,
+                )
+
+                with self.assertRaises(
+                    TemplateSourceTooLargeError
+                ):
+                    save_template_block(
+                        root,
+                        index["blocks"][0]["block_id"],
+                        index["source"]["sha256"],
+                        replacement,
+                    )
+
+            self.assertEqual(
+                source_path.read_text(encoding="utf-8"),
+                original,
+            )
+
+    def test_utf8_bom_is_preserved_outside_editable_first_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "\ufeff"
+                "- sensor:\r\n"
+                "    - name: First\r\n"
+                "      unique_id: first\r\n"
+                "      state: \"{{ 1 }}\"\r\n"
+            ).encode("utf-8")
+
+            source_path.write_bytes(original)
+
+            index = build_template_index(root)
+
+            self.assertEqual(
+                len(index["blocks"]),
+                1,
+            )
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            self.assertFalse(
+                current["block_text"].startswith("\ufeff")
+            )
+
+            replacement = current["block_text"].replace(
+                "{{ 1 }}",
+                "{{ 2 }}",
+            )
+
+            result = save_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+                replacement,
+            )
+
+            expected = original.replace(
+                b"{{ 1 }}",
+                b"{{ 2 }}",
+                1,
+            )
+
+            self.assertTrue(result["changed"])
+            self.assertEqual(
+                source_path.read_bytes(),
+                expected,
+            )
+            self.assertTrue(
+                source_path.read_bytes().startswith(
+                    b"\xef\xbb\xbf"
+                )
+            )
+
+    def test_last_block_without_final_newline_remains_without_newline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\""
+            )
+
+            source_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            self.assertFalse(
+                current["block_text"].endswith("\n")
+            )
+
+            replacement = current["block_text"].replace(
+                "{{ 1 }}",
+                "{{ 2 }}",
+            )
+
+            save_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+                replacement,
+            )
+
+            saved = source_path.read_bytes()
+
+            self.assertFalse(saved.endswith(b"\n"))
+            self.assertIn(b"{{ 2 }}", saved)
+
+    def test_existing_final_newline_cannot_be_removed_by_block_edit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+            )
+
+            source_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            replacement = current["block_text"].rstrip(
+                "\r\n"
+            )
+
+            with self.assertRaises(
+                TemplateSourceValidationError
+            ):
+                save_template_block(
+                    root,
+                    index["blocks"][0]["block_id"],
+                    index["source"]["sha256"],
+                    replacement,
+                )
+
+            self.assertEqual(
+                source_path.read_text(encoding="utf-8"),
+                original,
+            )
+
+    def test_separator_comments_survive_saving_both_neighbor_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+                "\n"
+                "# ========================================\n"
+                "# SEPARATOR MUST REMAIN EXTERNAL\n"
+                "# ========================================\n"
+                "\n"
+                "- sensor:\n"
+                "    - name: Second\n"
+                "      unique_id: second\n"
+                "      state: \"{{ 2 }}\"\n"
+            )
+
+            source_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+
+            first = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            first_result = save_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+                first["block_text"].replace(
+                    "{{ 1 }}",
+                    "{{ 10 }}",
+                ),
+            )
+
+            second_index = build_template_index(root)
+
+            second = get_template_block(
+                root,
+                second_index["blocks"][1]["block_id"],
+                second_index["source"]["sha256"],
+            )
+
+            save_template_block(
+                root,
+                second_index["blocks"][1]["block_id"],
+                second_index["source"]["sha256"],
+                second["block_text"].replace(
+                    "{{ 2 }}",
+                    "{{ 20 }}",
+                ),
+            )
+
+            expected = (
+                original
+                .replace("{{ 1 }}", "{{ 10 }}", 1)
+                .replace("{{ 2 }}", "{{ 20 }}", 1)
+            )
+
+            saved = source_path.read_text(
+                encoding="utf-8"
+            )
+
+            self.assertEqual(saved, expected)
+            self.assertIn(
+                "# SEPARATOR MUST REMAIN EXTERNAL",
+                saved,
+            )
+            self.assertNotEqual(
+                first_result["source"]["sha256"],
+                index["source"]["sha256"],
+            )
+
+    def test_readback_mismatch_after_commit_is_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+            )
+
+            source_path.write_text(
+                original,
+                encoding="utf-8",
+            )
+
+            index = build_template_index(root)
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            replacement = current["block_text"].replace(
+                "{{ 1 }}",
+                "{{ 2 }}",
+            )
+
+            def simulate_post_commit_change(
+                path,
+                proposed_bytes,
+                expected_sha256,
+                source_mode,
+            ):
+                path.write_bytes(
+                    proposed_bytes
+                    + b"# external post-commit change\n"
+                )
+
+            with mock.patch(
+                "template_navigator._atomic_replace_bytes",
+                side_effect=simulate_post_commit_change,
+            ):
+                with self.assertRaises(
+                    TemplateSourceChangedError
+                ):
+                    save_template_block(
+                        root,
+                        index["blocks"][0]["block_id"],
+                        index["source"]["sha256"],
+                        replacement,
+                    )
+
+            self.assertIn(
+                b"external post-commit change",
+                source_path.read_bytes(),
+            )
+
+    def test_atomic_replace_rejects_permission_mode_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source_path = root / "templates.yaml"
+
+            original = b"original\n"
+            proposed = b"proposed\n"
+
+            source_path.write_bytes(original)
+
+            with mock.patch(
+                "template_navigator.stat.S_IMODE",
+                return_value=0o644,
+            ):
+                with mock.patch(
+                    "template_navigator.os.replace"
+                ) as replace:
+                    with self.assertRaises(
+                        TemplateSourceChangedError
+                    ):
+                        _atomic_replace_bytes(
+                            source_path,
+                            proposed,
+                            hashlib.sha256(original).hexdigest(),
+                            0o600,
+                        )
+
+            replace.assert_not_called()
+
+            self.assertEqual(
+                source_path.read_bytes(),
+                original,
+            )
+
+            self.assertEqual(
+                list(root.glob(".templates.yaml.*.tmp")),
+                [],
+            )
+
+    def test_parent_directory_is_fsynced_on_posix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            with mock.patch(
+                "template_navigator.os.name",
+                "posix",
+            ):
+                with mock.patch(
+                    "template_navigator.os.open",
+                    return_value=123,
+                ) as open_directory:
+                    with mock.patch(
+                        "template_navigator.os.fsync"
+                    ) as fsync:
+                        with mock.patch(
+                            "template_navigator.os.close"
+                        ) as close:
+                            _fsync_parent_directory(root)
+
+            open_directory.assert_called_once()
+            fsync.assert_called_once_with(123)
+            close.assert_called_once_with(123)
 
     def test_builds_index_without_rewriting_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

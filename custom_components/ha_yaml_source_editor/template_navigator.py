@@ -224,6 +224,11 @@ def get_template_block(
 
     block_text = "".join(lines[start_index:end_index])
 
+    # Keep a physical UTF-8 BOM under backend control instead of exposing
+    # it as part of the editable block.
+    if start_index == 0 and block_text.startswith("\ufeff"):
+        block_text = block_text.removeprefix("\ufeff")
+
     return {
         "source": {
             "path": source["path"],
@@ -355,6 +360,18 @@ def _save_template_block_locked(
         lines[start_index:end_index]
     )
 
+    source_bom = ""
+
+    if start_index == 0 and original_block_text.startswith("\ufeff"):
+        source_bom = "\ufeff"
+        original_block_text = original_block_text.removeprefix("\ufeff")
+
+    if replacement_text.startswith("\ufeff"):
+        raise TemplateSourceValidationError(
+            "UTF-8 BOM is managed by the physical Template Source "
+            "and must not be supplied inside an edited block."
+        )
+
     if (
         _ends_with_line_break(original_block_text)
         and not _ends_with_line_break(replacement_text)
@@ -365,7 +382,7 @@ def _save_template_block_locked(
 
     _validate_replacement_block(replacement_text)
 
-    prefix = "".join(lines[:start_index])
+    prefix = "".join(lines[:start_index]) + source_bom
     suffix = "".join(lines[end_index:])
     proposed_text = prefix + replacement_text + suffix
 
@@ -577,6 +594,25 @@ def _atomic_replace_bytes(
 
         os.chmod(temp_path, source_mode)
 
+        # Content is not the only observable file state that replacement can
+        # overwrite. Detect portable permission-mode changes as another stale
+        # condition before committing the prepared temp file.
+        try:
+            latest_mode = stat.S_IMODE(
+                source_path.stat().st_mode
+            )
+        except OSError as err:
+            raise TemplateSourceChangedError(
+                "Template Source metadata became unavailable before "
+                "the targeted save."
+            ) from err
+
+        if latest_mode != source_mode:
+            raise TemplateSourceChangedError(
+                "Template Source permissions changed before the targeted "
+                "save could be committed."
+            )
+
         # Verify the real Source only after the complete temp file is ready.
         # This makes the stale-check window before os.replace() as small as
         # practical while also serializing writes initiated by this integration.
@@ -598,6 +634,11 @@ def _atomic_replace_bytes(
 
         os.replace(temp_path, source_path)
 
+        # The file contents were fsynced before the rename. On POSIX, also
+        # sync the parent directory so the directory-entry replacement is
+        # made durable before reporting a verified save.
+        _fsync_parent_directory(source_path.parent)
+
     except TemplateSourceError:
         raise
     except OSError as err:
@@ -610,6 +651,35 @@ def _atomic_replace_bytes(
                 temp_path.unlink()
             except OSError:
                 pass
+
+
+def _fsync_parent_directory(directory: Path) -> None:
+    """Sync a replaced directory entry where POSIX directory fsync is available."""
+    if os.name != "posix":
+        return
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+
+    try:
+        directory_fd = os.open(directory, flags)
+    except OSError as err:
+        raise TemplateSourceWriteError(
+            "Template Source was replaced, but its parent directory "
+            "could not be opened for durability verification."
+        ) from err
+
+    try:
+        os.fsync(directory_fd)
+    except OSError as err:
+        raise TemplateSourceWriteError(
+            "Template Source was replaced, but its parent directory "
+            "could not be synchronized."
+        ) from err
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            pass
 
 
 def _ends_with_line_break(text: str) -> bool:
@@ -681,6 +751,11 @@ def index_template_text(source_text: str) -> list[dict[str, Any]]:
 
     for index, line in enumerate(lines):
         logical_line = _without_line_ending(line)
+
+        # UTF-8 BOM belongs to the physical Source file, not to the
+        # editable logical Template block.
+        if index == 0:
+            logical_line = logical_line.removeprefix("\ufeff")
 
         match = _TOP_LEVEL_BLOCK_RE.match(logical_line)
         if match is None:
