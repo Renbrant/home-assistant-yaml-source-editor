@@ -295,3 +295,76 @@ test("Template save WebSocket distinguishes uncertain post-commit state", async 
     "Commit uncertainty must be mapped distinctly before normal write errors",
   );
 });
+
+test("Template full Source WebSocket is admin-only and backend-authoritative", async () => {
+  const constants = await readFile(constPath, "utf8");
+  const source = await readFile(websocketPath, "utf8");
+
+  assert.match(
+    constants,
+    /WS_TYPE_TEMPLATES_SOURCE_GET = f"\{DOMAIN\}\/templates\/source\/get"/,
+  );
+
+  assert.match(
+    source,
+    /async_register_command\(hass, websocket_templates_source_get\)/,
+  );
+
+  const functionStart = source.indexOf(
+    "async def websocket_templates_source_get("
+  );
+
+  assert.notEqual(
+    functionStart,
+    -1,
+    "Missing Template full Source WebSocket",
+  );
+
+  const decoratorStart = source.lastIndexOf(
+    "@websocket_api.require_admin",
+    functionStart,
+  );
+
+  assert.notEqual(
+    decoratorStart,
+    -1,
+    "Template full Source WebSocket must require admin",
+  );
+
+  const nextCommand = source.indexOf(
+    "@websocket_api.require_admin",
+    functionStart + 1,
+  );
+
+  const endpoint = source.slice(
+    decoratorStart,
+    nextCommand === -1 ? source.length : nextCommand,
+  );
+
+  assert.match(
+    endpoint,
+    /get_template_source/,
+  );
+
+  assert.match(
+    endpoint,
+    /expected_source_sha256/,
+  );
+
+  assert.match(
+    endpoint,
+    /template_source_changed/,
+  );
+
+  assert.doesNotMatch(
+    endpoint,
+    /vol\.Required\("source_path"\)|vol\.Required\("relative_path"\)|vol\.Required\("start_line"\)|vol\.Required\("end_line"\)/,
+    "Frontend must not choose the physical Template Source path or range",
+  );
+
+  assert.doesNotMatch(
+    endpoint,
+    /write_text|write_bytes|os\.replace|commit_prepared_template_block_save/,
+    "Full Source endpoint must remain read-only",
+  );
+});

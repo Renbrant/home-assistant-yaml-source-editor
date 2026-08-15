@@ -169,6 +169,69 @@ def build_template_index(config_dir: str | Path) -> dict[str, Any]:
     }
 
 
+
+def get_template_source(
+    config_dir: str | Path,
+    expected_source_sha256: str,
+) -> dict[str, Any]:
+    """Return the exact full configured Template Source snapshot.
+
+    The physical Source path always comes from backend discovery. The caller
+    supplies only the Source SHA observed from the Explorer index.
+    """
+    root = Path(config_dir).resolve()
+    result = build_template_index(root)
+
+    if not result.get("available"):
+        raise TemplateSourceError(
+            result.get("message")
+            or "No supported YAML Template Source is currently available."
+        )
+
+    source = result["source"]
+    current_sha256 = source["sha256"]
+
+    if current_sha256 != expected_source_sha256:
+        raise TemplateSourceChangedError(
+            "Template Source changed after Explorer indexing. Refresh and try again."
+        )
+
+    source_path = resolve_config_path(
+        root,
+        source["relative_path"],
+    )
+
+    source_text, source_bytes = _read_utf8_file(
+        source_path
+    )
+
+    verified_sha256 = hashlib.sha256(
+        source_bytes
+    ).hexdigest()
+
+    if (
+        verified_sha256 != current_sha256
+        or verified_sha256 != expected_source_sha256
+    ):
+        raise TemplateSourceChangedError(
+            "Template Source changed while the full Source was being read. "
+            "Refresh and try again."
+        )
+
+    return {
+        "source": {
+            "path": source["path"],
+            "relative_path": source["relative_path"],
+            "size_bytes": len(source_bytes),
+            "sha256": verified_sha256,
+            "line_count": source["line_count"],
+            "block_count": source["block_count"],
+            "entity_count": source["entity_count"],
+        },
+        "source_text": source_text,
+    }
+
+
 def get_template_block(
     config_dir: str | Path,
     block_id: str,

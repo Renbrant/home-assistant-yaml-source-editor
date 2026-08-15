@@ -27,6 +27,7 @@ from .const import (
     WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
     WS_TYPE_TEMPLATES_INDEX,
+    WS_TYPE_TEMPLATES_SOURCE_GET,
     WS_TYPE_TEMPLATES_BLOCK_GET,
     WS_TYPE_TEMPLATES_BLOCK_VALIDATE,
     WS_TYPE_TEMPLATES_BLOCK_SAVE,
@@ -53,6 +54,7 @@ from .template_navigator import (
     build_template_index,
     commit_prepared_template_block_save,
     get_template_block,
+    get_template_source,
     prepare_template_block_save,
 )
 from .template_validation import (
@@ -72,6 +74,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_import_ha_version)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
     websocket_api.async_register_command(hass, websocket_templates_index)
+    websocket_api.async_register_command(hass, websocket_templates_source_get)
     websocket_api.async_register_command(hass, websocket_templates_block_get)
     websocket_api.async_register_command(hass, websocket_templates_block_validate)
     websocket_api.async_register_command(hass, websocket_templates_block_save)
@@ -344,6 +347,57 @@ async def websocket_documents_import_ha_version(
         return
 
     connection.send_result(msg["id"], {"document": document})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_SOURCE_GET,
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_source_get(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the exact full configured Template Source snapshot."""
+    try:
+        result = await hass.async_add_executor_job(
+            get_template_source,
+            Path(hass.config.config_dir),
+            msg["expected_source_sha256"],
+        )
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateSourceTooLargeError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_too_large",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(
+        msg["id"],
+        result,
+    )
+
 
 @websocket_api.require_admin
 @websocket_api.websocket_command(

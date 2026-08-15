@@ -28,6 +28,7 @@ from template_navigator import (  # noqa: E402
     commit_prepared_template_block_save,
     find_simple_template_include,
     get_template_block,
+    get_template_source,
     index_template_text,
     prepare_template_block_save,
     resolve_config_path,
@@ -250,6 +251,88 @@ class TemplateNavigatorTest(unittest.TestCase):
                 entity["edit_end_line"],
                 block["end_line"],
             )
+    def test_get_template_source_returns_exact_full_raw_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_bytes(
+                b"template: !include templates.yaml\r\n"
+            )
+
+            raw_source = (
+                b"\xef\xbb\xbf# HEADER\r\n"
+                b"\r\n"
+                b"- sensor:\r\n"
+                b"    - name: \"First\"\r\n"
+                b"      unique_id: first\r\n"
+                b"      state: \"{{ 1 }}\"\r\n"
+                b"\r\n"
+                b"# External trailing comment\r\n"
+            )
+
+            source_path = root / "templates.yaml"
+            source_path.write_bytes(raw_source)
+
+            index = build_template_index(root)
+            expected_sha256 = hashlib.sha256(
+                raw_source
+            ).hexdigest()
+
+            result = get_template_source(
+                root,
+                index["source"]["sha256"],
+            )
+
+            self.assertEqual(
+                result["source"]["sha256"],
+                expected_sha256,
+            )
+
+            self.assertEqual(
+                result["source_text"].encode("utf-8"),
+                raw_source,
+            )
+
+            self.assertEqual(
+                source_path.read_bytes(),
+                raw_source,
+            )
+
+    def test_get_template_source_rejects_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+            source_path.write_text(
+                (
+                    "- sensor:\n"
+                    "    - name: First\n"
+                    "      unique_id: first\n"
+                    "      state: \"{{ 1 }}\"\n"
+                ),
+                encoding="utf-8",
+            )
+
+            original = source_path.read_bytes()
+
+            with self.assertRaises(
+                TemplateSourceChangedError
+            ):
+                get_template_source(
+                    root,
+                    "0" * 64,
+                )
+
+            self.assertEqual(
+                source_path.read_bytes(),
+                original,
+            )
+
     def test_get_template_block_returns_exact_raw_block(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
