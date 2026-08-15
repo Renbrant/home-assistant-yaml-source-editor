@@ -24,9 +24,11 @@ from template_navigator import (  # noqa: E402
     TemplateSourceValidationError,
     TemplateSourceWriteError,
     build_template_index,
+    commit_prepared_template_block_save,
     find_simple_template_include,
     get_template_block,
     index_template_text,
+    prepare_template_block_save,
     resolve_config_path,
     save_template_block,
 )
@@ -1304,6 +1306,169 @@ class TemplateNavigatorTest(unittest.TestCase):
             open_directory.assert_called_once()
             fsync.assert_called_once_with(123)
             close.assert_called_once_with(123)
+
+    def test_prepare_save_is_non_mutating_until_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+                "\n"
+                "# External separator\n"
+                "\n"
+                "- sensor:\n"
+                "    - name: Second\n"
+                "      unique_id: second\n"
+                "      state: \"{{ 2 }}\"\n"
+            ).encode("utf-8")
+
+            source_path.write_bytes(
+                original
+            )
+
+            index = build_template_index(
+                root
+            )
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            replacement = (
+                current["block_text"].replace(
+                    "{{ 1 }}",
+                    "{{ 10 }}",
+                )
+            )
+
+            prepared = prepare_template_block_save(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+                replacement,
+            )
+
+            # Preparation must not mutate the canonical physical Source.
+            self.assertEqual(
+                source_path.read_bytes(),
+                original,
+            )
+
+            self.assertTrue(
+                prepared.changed
+            )
+
+            self.assertEqual(
+                prepared.expected_source_sha256,
+                index["source"]["sha256"],
+            )
+
+            self.assertEqual(
+                prepared.source_relative_path,
+                "templates.yaml",
+            )
+
+            expected = original.replace(
+                b"{{ 1 }}",
+                b"{{ 10 }}",
+                1,
+            )
+
+            self.assertEqual(
+                prepared.proposed_bytes,
+                expected,
+            )
+
+            result = commit_prepared_template_block_save(
+                prepared
+            )
+
+            self.assertTrue(
+                result["changed"]
+            )
+
+            self.assertEqual(
+                source_path.read_bytes(),
+                expected,
+            )
+
+    def test_commit_rejects_change_during_semantic_validation_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+
+            (root / "configuration.yaml").write_text(
+                "template: !include templates.yaml\n",
+                encoding="utf-8",
+            )
+
+            source_path = root / "templates.yaml"
+
+            original = (
+                "- sensor:\n"
+                "    - name: First\n"
+                "      unique_id: first\n"
+                "      state: \"{{ 1 }}\"\n"
+            ).encode("utf-8")
+
+            source_path.write_bytes(
+                original
+            )
+
+            index = build_template_index(
+                root
+            )
+
+            current = get_template_block(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+            )
+
+            prepared = prepare_template_block_save(
+                root,
+                index["blocks"][0]["block_id"],
+                index["source"]["sha256"],
+                current["block_text"].replace(
+                    "{{ 1 }}",
+                    "{{ 2 }}",
+                ),
+            )
+
+            external = original.replace(
+                b"{{ 1 }}",
+                b"{{ 99 }}",
+                1,
+            )
+
+            # Simulate another writer changing the file while HA semantic
+            # validation is running between prepare and commit.
+            source_path.write_bytes(
+                external
+            )
+
+            with self.assertRaises(
+                TemplateSourceChangedError
+            ):
+                commit_prepared_template_block_save(
+                    prepared
+                )
+
+            self.assertEqual(
+                source_path.read_bytes(),
+                external,
+            )
 
     def test_builds_index_without_rewriting_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

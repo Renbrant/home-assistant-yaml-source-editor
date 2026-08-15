@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
@@ -77,6 +78,21 @@ class TemplateSourceValidationError(TemplateSourceError):
 
 class TemplateSourceWriteError(TemplateSourceError):
     """Raised when a targeted Template Source write cannot be completed safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedTemplateBlockSave:
+    """Immutable candidate produced before semantic validation."""
+
+    config_root: Path
+    source_path: Path
+    source_relative_path: str
+    block_id: str
+    expected_source_sha256: str
+    proposed_text: str
+    proposed_bytes: bytes
+    source_mode: int | None
+    changed: bool
 
 
 def build_template_index(config_dir: str | Path) -> dict[str, Any]:
@@ -249,18 +265,40 @@ def save_template_block(
     expected_source_sha256: str,
     replacement_text: str,
 ) -> dict[str, Any]:
-    """Atomically replace one backend-indexed top-level Template block.
+    """Prepare and atomically commit one targeted Template block save.
 
-    The frontend supplies only block identity, the Source snapshot SHA,
-    and replacement raw text. Path and line range are always rediscovered
-    by the backend.
+    This convenience wrapper preserves the existing synchronous API.
+    Runtime callers that require asynchronous semantic validation should
+    call prepare_template_block_save(), validate the prepared proposed_text,
+    and then call commit_prepared_template_block_save().
+    """
+    prepared = prepare_template_block_save(
+        config_dir,
+        block_id,
+        expected_source_sha256,
+        replacement_text,
+    )
 
-    Unrelated Source text is never parsed and reserialized. The proposed
-    complete file is parsed only for validation, then written as raw UTF-8
-    bytes using an atomic same-directory replacement.
+    return commit_prepared_template_block_save(
+        prepared
+    )
+
+
+def prepare_template_block_save(
+    config_dir: str | Path,
+    block_id: str,
+    expected_source_sha256: str,
+    replacement_text: str,
+) -> PreparedTemplateBlockSave:
+    """Build and structurally validate an exact raw save candidate.
+
+    No filesystem mutation occurs in this phase. The resulting immutable
+    candidate can safely pass through additional asynchronous validation
+    before commit. The later commit phase rechecks the physical Source
+    snapshot before any replacement occurs.
     """
     with _TEMPLATE_WRITE_LOCK:
-        return _save_template_block_locked(
+        return _prepare_template_block_save_locked(
             config_dir,
             block_id,
             expected_source_sha256,
@@ -268,13 +306,13 @@ def save_template_block(
         )
 
 
-def _save_template_block_locked(
+def _prepare_template_block_save_locked(
     config_dir: str | Path,
     block_id: str,
     expected_source_sha256: str,
     replacement_text: str,
-) -> dict[str, Any]:
-    """Perform one targeted Template block write while holding the write lock."""
+) -> PreparedTemplateBlockSave:
+    """Prepare one candidate while serializing integration-local access."""
     root = Path(config_dir).resolve()
     current_index = build_template_index(root)
 
@@ -311,8 +349,13 @@ def _save_template_block_locked(
         source["relative_path"],
     )
 
-    source_text, source_bytes = _read_utf8_file(source_path)
-    verified_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    source_text, source_bytes = _read_utf8_file(
+        source_path
+    )
+
+    verified_sha256 = hashlib.sha256(
+        source_bytes
+    ).hexdigest()
 
     if (
         verified_sha256 != current_sha256
@@ -322,7 +365,7 @@ def _save_template_block_locked(
             "Template Source changed while preparing the save. Refresh and try again."
         )
 
-    # Reject obviously oversized edits before composing a second complete
+    # Reject obviously oversized edits before composing another complete
     # Source string in memory.
     if len(replacement_text) > MAX_TEMPLATE_SOURCE_BYTES:
         raise TemplateSourceTooLargeError(
@@ -343,7 +386,10 @@ def _save_template_block_locked(
             "Edited Template block exceeds the 8 MiB safety limit."
         )
 
-    lines = source_text.splitlines(keepends=True)
+    lines = source_text.splitlines(
+        keepends=True
+    )
+
     start_index = block["start_line"] - 1
     end_index = block["end_line"]
 
@@ -362,9 +408,14 @@ def _save_template_block_locked(
 
     source_bom = ""
 
-    if start_index == 0 and original_block_text.startswith("\ufeff"):
+    if (
+        start_index == 0
+        and original_block_text.startswith("\ufeff")
+    ):
         source_bom = "\ufeff"
-        original_block_text = original_block_text.removeprefix("\ufeff")
+        original_block_text = (
+            original_block_text.removeprefix("\ufeff")
+        )
 
     if replacement_text.startswith("\ufeff"):
         raise TemplateSourceValidationError(
@@ -380,14 +431,28 @@ def _save_template_block_locked(
             "The edited Template block must keep its terminating line break."
         )
 
-    _validate_replacement_block(replacement_text)
+    _validate_replacement_block(
+        replacement_text
+    )
 
-    prefix = "".join(lines[:start_index]) + source_bom
-    suffix = "".join(lines[end_index:])
-    proposed_text = prefix + replacement_text + suffix
+    prefix = (
+        "".join(lines[:start_index])
+        + source_bom
+    )
+    suffix = "".join(
+        lines[end_index:]
+    )
+
+    proposed_text = (
+        prefix
+        + replacement_text
+        + suffix
+    )
 
     try:
-        proposed_bytes = proposed_text.encode("utf-8")
+        proposed_bytes = proposed_text.encode(
+            "utf-8"
+        )
     except UnicodeEncodeError as err:
         raise TemplateSourceValidationError(
             "Edited Template block cannot be encoded as UTF-8."
@@ -398,11 +463,17 @@ def _save_template_block_locked(
             "Template Source exceeds the 8 MiB safety limit."
         )
 
-    _validate_complete_template_yaml(proposed_text)
+    _validate_complete_template_yaml(
+        proposed_text
+    )
 
-    proposed_blocks = index_template_text(proposed_text)
+    proposed_blocks = index_template_text(
+        proposed_text
+    )
 
-    if len(proposed_blocks) != len(current_index.get("blocks", [])):
+    if len(proposed_blocks) != len(
+        current_index.get("blocks", [])
+    ):
         raise TemplateSourceValidationError(
             "The edited block must remain exactly one top-level Template block."
         )
@@ -422,8 +493,11 @@ def _save_template_block_locked(
         )
 
     replacement_line_count = len(
-        replacement_text.splitlines(keepends=True)
+        replacement_text.splitlines(
+            keepends=True
+        )
     )
+
     expected_end_line = (
         block["start_line"]
         + replacement_line_count
@@ -431,45 +505,136 @@ def _save_template_block_locked(
     )
 
     if (
-        proposed_block["start_line"] != block["start_line"]
-        or proposed_block["end_line"] != expected_end_line
+        proposed_block["start_line"]
+        != block["start_line"]
+        or proposed_block["end_line"]
+        != expected_end_line
     ):
         raise TemplateSourceValidationError(
             "The edited text must remain entirely inside the selected "
             "top-level Template block."
         )
 
-    if proposed_bytes == source_bytes:
+    changed = proposed_bytes != source_bytes
+    source_mode = None
+
+    if changed:
+        try:
+            source_mode = stat.S_IMODE(
+                source_path.stat().st_mode
+            )
+        except OSError as err:
+            raise TemplateSourceWriteError(
+                "Unable to inspect Template Source file permissions."
+            ) from err
+
+    return PreparedTemplateBlockSave(
+        config_root=root,
+        source_path=source_path,
+        source_relative_path=source[
+            "relative_path"
+        ],
+        block_id=block_id,
+        expected_source_sha256=(
+            expected_source_sha256
+        ),
+        proposed_text=proposed_text,
+        proposed_bytes=proposed_bytes,
+        source_mode=source_mode,
+        changed=changed,
+    )
+
+
+def commit_prepared_template_block_save(
+    prepared: PreparedTemplateBlockSave,
+) -> dict[str, Any]:
+    """Commit an already validated candidate after fresh stale checks."""
+    with _TEMPLATE_WRITE_LOCK:
+        return _commit_prepared_template_block_save_locked(
+            prepared
+        )
+
+
+def _commit_prepared_template_block_save_locked(
+    prepared: PreparedTemplateBlockSave,
+) -> dict[str, Any]:
+    """Commit a candidate only if its original Source snapshot still exists."""
+    root = prepared.config_root
+
+    current_index = build_template_index(
+        root
+    )
+
+    if not current_index.get("available"):
+        raise TemplateSourceChangedError(
+            "Template Source is no longer available. Refresh and try again."
+        )
+
+    current_source = current_index["source"]
+
+    if (
+        current_source["sha256"]
+        != prepared.expected_source_sha256
+    ):
+        raise TemplateSourceChangedError(
+            "Template Source changed while the edit was being validated. "
+            "Refresh and try again."
+        )
+
+    if (
+        current_source["relative_path"]
+        != prepared.source_relative_path
+    ):
+        raise TemplateSourceChangedError(
+            "Configured Template Source changed while the edit was being validated. "
+            "Refresh and try again."
+        )
+
+    current_source_path = resolve_config_path(
+        root,
+        current_source["relative_path"],
+    )
+
+    if (
+        current_source_path.resolve()
+        != prepared.source_path.resolve()
+    ):
+        raise TemplateSourceChangedError(
+            "Configured Template Source path changed while the edit was "
+            "being validated. Refresh and try again."
+        )
+
+    if not prepared.changed:
         result = get_template_block(
             root,
-            block_id,
-            expected_source_sha256,
+            prepared.block_id,
+            prepared.expected_source_sha256,
         )
+
         result["changed"] = False
-        result["previous_source_sha256"] = expected_source_sha256
+        result["previous_source_sha256"] = (
+            prepared.expected_source_sha256
+        )
+
         return result
 
-    try:
-        source_mode = stat.S_IMODE(
-            source_path.stat().st_mode
-        )
-    except OSError as err:
+    if prepared.source_mode is None:
         raise TemplateSourceWriteError(
-            "Unable to inspect Template Source file permissions."
-        ) from err
+            "Prepared Template save is missing required file metadata."
+        )
 
     _atomic_replace_bytes(
-        source_path,
-        proposed_bytes,
-        expected_source_sha256,
-        source_mode,
+        current_source_path,
+        prepared.proposed_bytes,
+        prepared.expected_source_sha256,
+        prepared.source_mode,
     )
 
     readback_text, readback_bytes = _read_utf8_file(
-        source_path
+        current_source_path
     )
 
-    if readback_bytes != proposed_bytes:
+    if readback_bytes != prepared.proposed_bytes:
         raise TemplateSourceChangedError(
             "Template Source changed immediately after the targeted save."
         )
@@ -478,16 +643,22 @@ def _save_template_block_locked(
         readback_bytes
     ).hexdigest()
 
-    # Parse once more from the exact bytes read back from disk.
-    _validate_complete_template_yaml(readback_text)
+    # Validate once more from the exact bytes read back from disk.
+    _validate_complete_template_yaml(
+        readback_text
+    )
 
     result = get_template_block(
         root,
-        block_id,
+        prepared.block_id,
         new_sha256,
     )
+
     result["changed"] = True
-    result["previous_source_sha256"] = expected_source_sha256
+    result["previous_source_sha256"] = (
+        prepared.expected_source_sha256
+    )
+
     return result
 
 
