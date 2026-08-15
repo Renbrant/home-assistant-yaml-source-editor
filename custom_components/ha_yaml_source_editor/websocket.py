@@ -28,6 +28,7 @@ from .const import (
     WS_TYPE_STATUS,
     WS_TYPE_TEMPLATES_INDEX,
     WS_TYPE_TEMPLATES_BLOCK_GET,
+    WS_TYPE_TEMPLATES_BLOCK_VALIDATE,
 )
 from .document_store import (
     DocumentAlreadyExistsError,
@@ -44,8 +45,15 @@ from .template_navigator import (
     TemplateBlockNotFoundError,
     TemplateSourceChangedError,
     TemplateSourceError,
+    TemplateSourceTooLargeError,
+    TemplateSourceValidationError,
     build_template_index,
     get_template_block,
+    prepare_template_block_save,
+)
+from .template_validation import (
+    TemplateSemanticValidationError,
+    async_validate_prepared_template_save,
 )
 
 
@@ -61,6 +69,7 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_hash_sha256)
     websocket_api.async_register_command(hass, websocket_templates_index)
     websocket_api.async_register_command(hass, websocket_templates_block_get)
+    websocket_api.async_register_command(hass, websocket_templates_block_validate)
 
 
 
@@ -381,6 +390,96 @@ async def websocket_templates_block_get(
         return
 
     connection.send_result(msg["id"], result)
+
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_BLOCK_VALIDATE,
+        vol.Required("block_id"): vol.All(
+            str,
+            vol.Length(min=1, max=128),
+        ),
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+        vol.Required("replacement_text"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_block_validate(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Validate one proposed Template block without writing the Source."""
+    try:
+        prepared = await hass.async_add_executor_job(
+            prepare_template_block_save,
+            Path(hass.config.config_dir),
+            msg["block_id"],
+            msg["expected_source_sha256"],
+            msg["replacement_text"],
+        )
+
+        await async_validate_prepared_template_save(
+            hass,
+            prepared,
+        )
+
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateBlockNotFoundError as err:
+        connection.send_error(
+            msg["id"],
+            "template_block_not_found",
+            str(err),
+        )
+        return
+    except TemplateSourceTooLargeError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_too_large",
+            str(err),
+        )
+        return
+    except TemplateSourceValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_structural_invalid",
+            str(err),
+        )
+        return
+    except TemplateSemanticValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_semantic_invalid",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(
+        msg["id"],
+        {
+            "valid": True,
+            "changed": prepared.changed,
+            "block_id": prepared.block_id,
+            "source_sha256": prepared.expected_source_sha256,
+        },
+    )
 
 @websocket_api.require_admin
 @websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TEMPLATES_INDEX})

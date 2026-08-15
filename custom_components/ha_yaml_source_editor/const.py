@@ -26,6 +26,7 @@ WS_TYPE_DOCUMENTS_IMPORT_HA_VERSION = f"{DOMAIN}/documents/import_ha_version"
 WS_TYPE_HASH_SHA256 = f"{DOMAIN}/hash/sha256"
 WS_TYPE_TEMPLATES_INDEX = f"{DOMAIN}/templates/index"
 WS_TYPE_TEMPLATES_BLOCK_GET = f"{DOMAIN}/templates/block/get"
+WS_TYPE_TEMPLATES_BLOCK_VALIDATE = f"{DOMAIN}/templates/block/validate"
 
 DOCUMENT_STORAGE_KEY = f"{DOMAIN}.documents"
 DOCUMENT_STORAGE_VERSION = 1
