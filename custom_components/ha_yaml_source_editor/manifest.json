@@ -1,10 +1,10 @@
 {
   "domain": "ha_yaml_source_editor",
   "name": "HA YAML Source Editor",
+  "after_dependencies": ["template"],
   "codeowners": ["@Renbrant"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "panel_custom"],
-  "after_dependencies": ["template"],
   "documentation": "https://github.com/Renbrant/home-assistant-yaml-source-editor",
   "integration_type": "service",
   "iot_class": "calculated",
