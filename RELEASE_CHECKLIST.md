@@ -9,9 +9,9 @@
 - [x] JavaScript checks pass.
 - [x] Python compile checks pass.
 - [x] `git diff --check` passes.
-- [ ] HACS Action passes without ignores.
-- [ ] Hassfest passes.
-- [ ] Project CI passes.
+- [x] HACS Action passes without ignores.
+- [x] Hassfest passes.
+- [x] Project CI passes.
 
 ### Template Navigator 26A
 
