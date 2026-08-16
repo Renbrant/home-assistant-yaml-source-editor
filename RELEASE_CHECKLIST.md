@@ -63,12 +63,12 @@
 - [x] CHANGELOG v0.3.0 content reviewed.
 - [x] Known limitations match actual 26A scope and safety guarantees.
 - [x] Manifest and integration version are `0.3.0`.
-- [ ] Post-release HACS upgrade from v0.2.2 to v0.3.0 validation completed.
-  - Intentionally deferred until the final v0.3.0 release/tag exists so HACS can exercise the real user upgrade path.
+- [x] Post-release HACS upgrade from v0.2.2 to v0.3.0 validation completed.
+  - Verified on HA DEV through the real HACS update path followed by a full Home Assistant restart.
 - [x] Final release candidate tested after a clean Home Assistant restart.
 - [x] Final PR / issue #28 acceptance criteria reviewed.
 - [x] Merge the v0.3.0 development branch.
-- [ ] Create GitHub Release `v0.3.0`.
+- [x] Create GitHub Release `v0.3.0`.
 
 ### Deferred to Template Navigator 26B
 
