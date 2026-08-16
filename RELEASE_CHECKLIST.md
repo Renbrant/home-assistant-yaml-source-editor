@@ -67,7 +67,7 @@
   - Intentionally deferred until the final v0.3.0 release/tag exists so HACS can exercise the real user upgrade path.
 - [x] Final release candidate tested after a clean Home Assistant restart.
 - [x] Final PR / issue #28 acceptance criteria reviewed.
-- [ ] Merge the v0.3.0 development branch.
+- [x] Merge the v0.3.0 development branch.
 - [ ] Create GitHub Release `v0.3.0`.
 
 ### Deferred to Template Navigator 26B

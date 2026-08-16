@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-08-15
 
 Template Navigator 26A and guarded physical Template Source editing release.
 

@@ -16,10 +16,7 @@ organization can disappear. HA YAML Source Editor keeps a separate raw **Source 
 document as the editable source of truth and deploys validated configuration through
 Home Assistant's supported Lovelace WebSocket API.
 
-**Current stable release: v0.2.2**
-
-**Current development version: v0.3.0** — Template Navigator 26A is implemented on the
-development branch and is being prepared for release.
+**Current stable release: v0.3.0**
 
 ![HA YAML Source Editor workspace](Photos/Screenshots/workspace.png)
 
@@ -354,7 +351,7 @@ unrestricted whole-file Template write action.
 The CodeMirror wrapper detects uniform LF, CRLF, or CR line separators and configures
 the editor state with the detected physical separator.
 
-The v0.3.0 development workflow includes automated regression coverage plus real Home
+The v0.3.0 release verification includes automated regression coverage plus real Home
 Assistant DEV round-trip verification for LF and CRLF. A CRLF Template block was edited,
 saved, removed again, and reproduced the complete CRLF baseline byte-for-byte without
 changing unrelated Source bytes.
