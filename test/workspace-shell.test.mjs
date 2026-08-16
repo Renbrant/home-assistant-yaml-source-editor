@@ -26,6 +26,14 @@ test("panel renders a workspace shell with explorer editor and inspector regions
   assert.match(panel, /aria-label="Editor"/);
   assert.match(panel, /class="workspace-region inspector-region"/);
   assert.match(panel, /aria-label="Inspector"/);
+  assert.match(
+    panel,
+    /\$\{this\._sourceEditorStatus\.lineEnding \?\? "No EOL"\}/
+  );
+  assert.doesNotMatch(
+    panel,
+    /YAML    LF    \$\{editorState\}/
+  );
 });
 
 test("panel exposes primary Source workflow commands inside the editor region", async () => {
@@ -175,8 +183,244 @@ test("Explorer omits normal Integration API status card and keeps navigation", a
   assert.match(explorer, /Storage Mode/);
   assert.doesNotMatch(explorer, /Integration version/);
   assert.doesNotMatch(explorer, /Backend API/);
-  assert.doesNotMatch(explorer, /Home Assistant/);
+  assert.match(explorer, /Home Assistant/);
+  assert.match(explorer, /YAML Templates/);
+  assert.match(explorer, /id="template-tree-body"/);
+  assert.match(explorer, /class="explorer-group"/);
   assert.match(panel, /Unable to reach the HA YAML Source Editor backend API/);
+});
+
+test("Explorer loads Template index through partial refresh without remounting the editor", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const loadTemplates =
+    panel.match(
+      /async _loadTemplateIndex\(\{ force = false \} = \{\}\) \{[\s\S]+?\n  \}/
+    )?.[0] ?? "";
+
+  assert.notEqual(loadTemplates, "", "Missing _loadTemplateIndex method");
+  assert.match(
+    loadTemplates,
+    /type: "ha_yaml_source_editor\/templates\/index"/
+  );
+  assert.match(loadTemplates, /this\._refreshTemplateTreeUi\(\)/);
+  assert.doesNotMatch(loadTemplates, /this\._render\(\)/);
+  assert.doesNotMatch(
+    loadTemplates,
+    /_attachSourceEditor|_destroySourceEditor|createSourceCodeEditor/
+  );
+
+  assert.match(panel, /this\._loadTemplateIndex\(\)/);
+  assert.match(panel, /_renderTemplateTree\(\)/);
+  assert.match(panel, /id="template-tree-body"/);
+  assert.match(panel, /YAML Templates/);
+});
+test("Explorer refresh reloads both dashboards and Template index", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const refreshDashboards = methodBody(panel, "_refreshDashboards()");
+
+  assert.match(
+    refreshDashboards,
+    /this\._loadDashboards\(\{\s*force:\s*true\s*\}\)/
+  );
+  assert.match(
+    refreshDashboards,
+    /this\._loadTemplateIndex\(\{\s*force:\s*true\s*\}\)/
+  );
+});
+test("Template Explorer reads blocks using backend-authoritative snapshot identity", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+
+  assert.match(
+    selectTemplate,
+    /type: "ha_yaml_source_editor\/templates\/block\/get"/
+  );
+  assert.match(
+    selectTemplate,
+    /block_id: blockId/
+  );
+  assert.match(
+    selectTemplate,
+    /expected_source_sha256: sourceSha256/
+  );
+
+  assert.doesNotMatch(
+    selectTemplate,
+    /source_path:|relative_path:|start_line:|end_line:/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._clearSelectedDashboard\(\)/
+  );
+  assert.match(
+    selectTemplate,
+    /this\._revealSelectedTemplateEntity\(\)/
+  );
+});
+
+test("Template target uses a distinct editable CodeMirror document mode", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const attachEditor = methodBody(panel, "_attachSourceEditor()");
+  const activeDocument = methodBody(
+    panel,
+    "_activeEditorDocument()"
+  );
+  const templateSection = methodBody(
+    panel,
+    "_renderTemplateBlockSection()"
+  );
+
+  assert.match(
+    activeDocument,
+    /templateBlockDocumentId/
+  );
+  assert.match(
+    activeDocument,
+    /text: this\._templateBlockText/
+  );
+  assert.match(
+    activeDocument,
+    /readOnly: false/
+  );
+
+  assert.match(
+    attachEditor,
+    /_handleEditorChange/
+  );
+
+  assert.match(
+    templateSection,
+    /id="save-template-block"/
+  );
+  assert.match(
+    templateSection,
+    /Save Template/
+  );
+  assert.match(
+    templateSection,
+    /Home Assistant Template semantic validation/
+  );
+  assert.doesNotMatch(
+    templateSection,
+    /preview is read-only/
+  );
+  assert.doesNotMatch(
+    templateSection,
+    /Save Source|Compare|Deploy|Initialize from HA/
+  );
+});
+
+test("Template child navigation preserves Explorer expansion and remains non-fatal", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+  const revealEntity = methodBody(
+    panel,
+    "_revealSelectedTemplateEntity()"
+  );
+  const wireTree = methodBody(
+    panel,
+    "_wireTemplateTreeHandlers()"
+  );
+
+  assert.match(
+    panel,
+    /this\._openTemplateBlockIds = new Set\(\)/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._openTemplateBlockIds\.add\(blockId\)/
+  );
+
+  assert.match(
+    panel,
+    /this\._openTemplateBlockIds\.has\(block\.block_id\)[\s\S]+open/
+  );
+
+  assert.match(
+    wireTree,
+    /details\.ontoggle/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateBlockIds\.add\(blockId\)/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateBlockIds\.delete\(blockId\)/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._templateSearchQuery\.trim\(\)[\s\S]+return/
+  );
+
+  assert.match(
+    revealEntity,
+    /typeof this\._sourceEditor\.revealLine === "function"/
+  );
+});
+test("Template search filters the existing index without remounting its input", async () => {
+  const panel = await readFile(panelPath, "utf8");
+  const renderTree = methodBody(
+    panel,
+    "_renderTemplateTree()"
+  );
+  const refreshTree = methodBody(
+    panel,
+    "_refreshTemplateTreeUi()"
+  );
+
+
+  assert.match(
+    panel,
+    /id="template-search-input"/
+  );
+
+  assert.match(
+    renderTree,
+    /filterTemplateBlocks/
+  );
+
+  assert.match(
+    renderTree,
+    /this\._templateSearchQuery/
+  );
+
+  assert.match(
+    renderTree,
+    /Boolean\(searchQuery\)/
+  );
+
+  assert.match(
+    panel,
+    /templateSearch\.oninput/
+  );
+
+  assert.match(
+    panel,
+    /this\._templateSearchQuery = templateSearch\.value/
+  );
+
+  assert.match(
+    panel,
+    /this\._refreshTemplateTreeUi\(\)/
+  );
+
+  assert.doesNotMatch(
+    refreshTree,
+    /template-search-input|_render\(\)/
+  );
 });
 
 test("Editor header owns dashboard context and labeled source statuses", async () => {
@@ -340,7 +584,7 @@ test("document switches still reset document-specific editor state", async () =>
 
   assert.match(selectDashboard, /this\._destroySourceEditor\(\)/);
   assert.match(attachSourceEditor, /if \(this\._sourceEditorDocumentId !== documentId\)/);
-  assert.match(attachSourceEditor, /this\._replaceSourceEditorText\(this\._sourceText, documentId,[\s\S]+resetHistory: true/);
+  assert.match(attachSourceEditor, /this\._replaceSourceEditorText\([\s\S]+text,[\s\S]+documentId,[\s\S]+resetHistory: true/);
 });
 
 function methodBody(source, signature) {
@@ -368,3 +612,395 @@ function methodBody(source, signature) {
 
   throw new Error(`Unterminated method body: ${signature}`);
 }
+
+test("Template edits use a dedicated buffer and unsaved-change guard", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const changeHandler = methodBody(
+    panel,
+    "_handleTemplateEditorChange(text)"
+  );
+
+  const discardGuard = methodBody(
+    panel,
+    "_confirmDiscardUnsavedChanges()"
+  );
+
+  assert.match(
+    panel,
+    /this\._templateBlockText = ""/
+  );
+
+  assert.match(
+    panel,
+    /this\._lastSavedTemplateBlockText = ""/
+  );
+
+  assert.match(
+    panel,
+    /_hasUnsavedTemplateChanges\(\)/
+  );
+
+  assert.match(
+    changeHandler,
+    /this\._templateBlockText = text/
+  );
+
+  assert.match(
+    discardGuard,
+    /this\._hasUnsavedEditorChanges\(\)/
+  );
+
+  assert.match(
+    discardGuard,
+    /This Template block has unsaved changes/
+  );
+});
+
+test("same Template block child navigation preserves the active edit buffer", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const selectTemplate = methodBody(
+    panel,
+    "async _selectTemplateBlock(blockId, entityId = null)"
+  );
+
+  assert.match(
+    selectTemplate,
+    /const sameLoadedBlock =/
+  );
+
+  assert.match(
+    selectTemplate,
+    /blockId === this\._selectedTemplateBlockId/
+  );
+
+  assert.match(
+    selectTemplate,
+    /!\["Stale", "Uncertain"\]\.includes/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._selectedTemplateEntityId = entityId/
+  );
+
+  assert.match(
+    selectTemplate,
+    /this\._revealSelectedTemplateEntity\(\)/
+  );
+
+  const sameBlockStart = selectTemplate.indexOf(
+    "if (sameLoadedBlock)"
+  );
+
+  const discardStart = selectTemplate.indexOf(
+    "if (!this._confirmDiscardUnsavedChanges())"
+  );
+
+  assert.ok(
+    sameBlockStart !== -1 &&
+      discardStart !== -1 &&
+      sameBlockStart < discardStart,
+    "Same-block navigation must preserve edits before any discard prompt",
+  );
+});
+
+test("Template Save submits only backend snapshot identity and raw block text", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const saveTemplate = methodBody(
+    panel,
+    "async _saveTemplateBlock()"
+  );
+
+  assert.match(
+    saveTemplate,
+    /ha_yaml_source_editor\/templates\/block\/save/
+  );
+
+  assert.match(
+    saveTemplate,
+    /block_id: blockId/
+  );
+
+  assert.match(
+    saveTemplate,
+    /expected_source_sha256: expectedSourceSha256/
+  );
+
+  assert.match(
+    saveTemplate,
+    /replacement_text: submittedText/
+  );
+
+  assert.doesNotMatch(
+    saveTemplate,
+    /source_path|relative_path|start_line|end_line/
+  );
+
+  assert.match(
+    saveTemplate,
+    /templateBlockDocumentId\(result\)/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateBlockText === submittedText/
+  );
+
+  assert.match(
+    saveTemplate,
+    /newer editor changes remain unsaved/
+  );
+});
+
+test("Template Save refreshes authoritative Explorer state after stale or uncertain results", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const saveTemplate = methodBody(
+    panel,
+    "async _saveTemplateBlock()"
+  );
+
+  assert.match(
+    saveTemplate,
+    /template_source_changed/
+  );
+
+  assert.match(
+    saveTemplate,
+    /template_commit_uncertain/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateSaveStatus = "Stale"/
+  );
+
+  assert.match(
+    saveTemplate,
+    /this\._templateSaveStatus = "Uncertain"/
+  );
+
+  const refreshMatches =
+    saveTemplate.match(
+      /this\._loadTemplateIndex\(\{\s*force: true,\s*\}\)/g
+    ) ?? [];
+
+  assert.ok(
+    refreshMatches.length >= 3,
+    "Save success, stale failure, and uncertain failure must refresh the Template index",
+  );
+
+  assert.match(
+    saveTemplate,
+    /Reopen the block/
+  );
+});
+
+test("Template Source file opens complete snapshot using backend-authoritative SHA only", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const openFullSource = methodBody(
+    panel,
+    "async _openTemplateFullSource()"
+  );
+
+  const wireTree = methodBody(
+    panel,
+    "_wireTemplateTreeHandlers()"
+  );
+
+  const renderTree = methodBody(
+    panel,
+    "_renderTemplateTree()"
+  );
+
+  assert.match(
+    renderTree,
+    /template-source-summary/
+  );
+
+  assert.match(
+    renderTree,
+    /explorer-tree-badge">FULL/
+  );
+
+  assert.match(
+    wireTree,
+    /\.template-source-summary/
+  );
+
+  assert.match(
+    wireTree,
+    /this\._openTemplateFullSource\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._confirmDiscardUnsavedChanges\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._clearTemplateSelection\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._clearSelectedDashboard\(\)/
+  );
+
+  assert.match(
+    openFullSource,
+    /type: "ha_yaml_source_editor\/templates\/source\/get"/
+  );
+
+  assert.match(
+    openFullSource,
+    /expected_source_sha256: sourceSha256/
+  );
+
+  assert.doesNotMatch(
+    openFullSource,
+    /source_path:|relative_path:|start_line:|end_line:/
+  );
+
+  assert.match(
+    openFullSource,
+    /err\?\.code === "template_source_changed"/
+  );
+
+  assert.match(
+    openFullSource,
+    /this\._loadTemplateIndex\(\{[\s\S]+force: true/
+  );
+});
+
+test("Full Template Source uses a distinct read-only CodeMirror document", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const activeDocument = methodBody(
+    panel,
+    "_activeEditorDocument()"
+  );
+
+  const fullSourceSection = methodBody(
+    panel,
+    "_renderTemplateFullSourceSection()"
+  );
+
+  assert.match(
+    activeDocument,
+    /this\._templateFullSourceStatus === "Loaded"/
+  );
+
+  assert.match(
+    activeDocument,
+    /templateSourceDocumentId/
+  );
+
+  assert.match(
+    activeDocument,
+    /text: this\._templateFullSourceResult\.source_text/
+  );
+
+  assert.match(
+    activeDocument,
+    /readOnly: true/
+  );
+
+  assert.match(
+    fullSourceSection,
+    /Read-only physical Source snapshot/
+  );
+
+  assert.match(
+    fullSourceSection,
+    /This view cannot be saved/
+  );
+
+  assert.doesNotMatch(
+    fullSourceSection,
+    /id="save-template-block"|Save Template/
+  );
+});
+
+test("Full Template Source renders as Template context without writable controls", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const editorRegion = methodBody(
+    panel,
+    "_renderEditorRegion()"
+  );
+
+  const editorTarget = methodBody(
+    panel,
+    "_renderEditorTargetContents()"
+  );
+
+  const editorSummary = methodBody(
+    panel,
+    "_renderEditorStateSummary()"
+  );
+
+  const inspectorPanel = methodBody(
+    panel,
+    "_renderInspectorPanel()"
+  );
+
+  assert.match(
+    editorRegion,
+    /fullTemplateSourceMode/
+  );
+
+  assert.match(
+    editorRegion,
+    /this\._renderTemplateFullSourceSection\(\)/
+  );
+
+  assert.match(
+    editorTarget,
+    /this\._templateFullSourceStatus !== "Idle"/
+  );
+
+  assert.match(
+    editorSummary,
+    /Mode: Read-only full source/
+  );
+
+  assert.match(
+    inspectorPanel,
+    /this\._renderTemplateFullSourceInspectorPanel\(\)/
+  );
+});
+
+test("Full Template Source cleanup invalidates in-flight reads and destroys deliberate document switches", async () => {
+  const panel = await readFile(panelPath, "utf8");
+
+  const clearSelection = methodBody(
+    panel,
+    "_clearTemplateSelection()"
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceStatus = "Idle"/
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceResult = null/
+  );
+
+  assert.match(
+    clearSelection,
+    /this\._templateFullSourceRequestId \+= 1/
+  );
+
+  assert.match(
+    clearSelection,
+    /if \(hadTemplateSelection\)[\s\S]+this\._destroySourceEditor\(\)/
+  );
+});

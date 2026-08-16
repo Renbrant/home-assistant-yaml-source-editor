@@ -1,5 +1,70 @@
 # Changelog
 
+## [0.3.0] - Unreleased
+
+Template Navigator 26A and guarded physical Template Source editing release.
+
+### Added
+
+- `YAML Templates` tree alongside existing dashboard navigation.
+- Safe discovery of the common `template: !include <file>` configuration without
+  scanning arbitrary YAML files.
+- Raw Template Source indexing with physical path, source ranges, logical blocks,
+  displayed names, `unique_id`, child locations, and optional section-comment groups.
+- Template search/filter by name, `unique_id`, and section context.
+- Targeted CodeMirror editing of complete safe top-level Template blocks.
+- Child Template entities as navigation targets inside their shared writable block.
+- Read-only full physical Template Source view.
+- Home Assistant Template semantic validation before physical Template writes.
+- Stale Source detection and explicit reopen/reconcile workflow.
+- Explicit `Commit uncertain` state for post-replace verification failures.
+- Uniform line-separator detection in CodeMirror so physical line-ending style survives
+  targeted editor round-trips.
+
+### Safety
+
+- Template Save is admin-only and snapshot-bound.
+- Save re-discovers/re-reads the Source and verifies file identity, block identity, and
+  indexed range before committing.
+- Candidate construction uses raw Source splicing rather than whole-file YAML
+  parse/modify/dump serialization.
+- Complete resulting YAML is structurally validated before persistence.
+- Home Assistant's Template semantic validator runs before commit.
+- Writes use a same-directory temporary file and atomic replacement with read-back
+  verification.
+- Stale external Source changes are rejected instead of overwritten.
+- A stale editor draft is never silently merged or blindly retried.
+- Template Save changes only the physical Source; it does not automatically reload
+  Template entities or restart Home Assistant.
+- Existing Lovelace Source, Compare, deployment, conflict detection, baseline, and
+  CodeMirror lifecycle protections remain unchanged.
+
+### Line endings and editor lifecycle
+
+- CodeMirror now configures a detected uniform LF, CRLF, or CR physical separator.
+- Editor text serialization uses `EditorState.sliceDoc()` so configured physical line
+  separators survive edits.
+- Editor status now reports the detected line-ending mode instead of hard-coding `LF`.
+- Read-only Full Source remains keyboard-focusable while isolating Home Assistant global
+  shortcuts.
+- Routine Home Assistant updates continue to preserve the active CodeMirror viewport
+  and do not remount the editor unnecessarily.
+
+### Verification performed during development
+
+- 49 Python regression tests passed.
+- 142 Node regression tests passed.
+- JavaScript checks, Python compile checks, and diff checks passed.
+- Real Home Assistant DEV Template Save preserved a CRLF file without introducing lone
+  LF/CR characters or changing unrelated bytes.
+- Removing the CRLF test edit through the UI reproduced the complete CRLF baseline
+  byte-for-byte.
+- Real UI semantic rejection preserved the invalid draft while performing zero physical
+  Source write.
+- Real UI stale/reconcile testing preserved the external Source, blocked stale retry,
+  required explicit reopen/reconcile, and did not write the stale editor draft.
+- The original LF test fixture was restored byte-for-byte after runtime tests.
+
 ## [0.2.2] - 2026-08-14
 
 Source editor lifecycle stability release.

@@ -8,14 +8,14 @@ import test from "node:test";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const integrationDir = join(root, "custom_components", "ha_yaml_source_editor");
 
-test("manifest and const version match v0.2.2", async () => {
+test("manifest and const version match v0.3.0", async () => {
   const manifest = JSON.parse(
     await readFile(join(integrationDir, "manifest.json"), "utf8"),
   );
   const constants = await readFile(join(integrationDir, "const.py"), "utf8");
   const versionMatch = constants.match(/^VERSION = "([^"]+)"$/m);
 
-  assert.equal(manifest.version, "0.2.2");
+  assert.equal(manifest.version, "0.3.0");
   assert.equal(versionMatch?.[1], manifest.version);
 });
 
@@ -30,6 +30,7 @@ test("manifest metadata is truthful for a custom integration service", async () 
   assert.equal(manifest.integration_type, "service");
   assert.equal(manifest.iot_class, "calculated");
   assert.deepEqual(manifest.dependencies, ["frontend", "http", "panel_custom"]);
+  assert.deepEqual(manifest.after_dependencies, ["template"]);
   assert.deepEqual(manifest.codeowners, ["@Renbrant"]);
 });
 

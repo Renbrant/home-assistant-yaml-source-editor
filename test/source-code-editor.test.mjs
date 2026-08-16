@@ -2,8 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  EditorState,
+} from "../custom_components/ha_yaml_source_editor/frontend/vendor/codemirror.mjs";
+
+import {
+  editorContentAttributes,
+  editorLineEndingLabelFromText,
+  editorLineSeparatorFromText,
   editorStatusFromText,
   editorTextFromDocument,
+  editorTextFromState,
   handleSourceEditorKeydown,
   shouldNotifyEditorChange,
   shouldRestoreEditorFocusSnapshot,
@@ -32,6 +40,151 @@ test("editor text helper preserves trailing newline exactly", () => {
   const sourceText = "views:\n  - title: Main\n";
 
   assert.equal(editorTextFromDocument(sourceText), sourceText);
+});
+
+test("editor detects uniform physical line separators without guessing mixed files", () => {
+  assert.equal(
+    editorLineSeparatorFromText(
+      "first\r\nsecond\r\n"
+    ),
+    "\r\n"
+  );
+
+  assert.equal(
+    editorLineSeparatorFromText(
+      "first\nsecond\n"
+    ),
+    "\n"
+  );
+
+  assert.equal(
+    editorLineSeparatorFromText(
+      "first\rsecond\r"
+    ),
+    "\r"
+  );
+
+  assert.equal(
+    editorLineSeparatorFromText(
+      "single line"
+    ),
+    null
+  );
+
+  assert.equal(
+    editorLineSeparatorFromText(
+      "first\r\nsecond\nthird\r\n"
+    ),
+    null
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\r\nsecond\r\n"
+    ),
+    "CRLF"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\nsecond\n"
+    ),
+    "LF"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\rsecond\r"
+    ),
+    "CR"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\r\nsecond\nthird\r\n"
+    ),
+    "Mixed"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "single line"
+    ),
+    "No EOL"
+  );
+});
+
+test("CodeMirror round-trips a CRLF document through an edit without normalization", () => {
+  const original =
+    "- sensor:\r\n" +
+    "    - name: Original\r\n" +
+    "      unique_id: original\r\n" +
+    "      state: \"{{ 1 }}\"\r\n";
+
+  const separator =
+    editorLineSeparatorFromText(original);
+
+  assert.equal(separator, "\r\n");
+
+  const state = EditorState.create({
+    doc: original,
+    extensions: [
+      EditorState.lineSeparator.of(separator),
+    ],
+  });
+
+  assert.equal(state.lineBreak, "\r\n");
+  assert.equal(
+    editorTextFromState(state),
+    original
+  );
+
+  // CodeMirror document coordinates count a logical line break as one
+  // position even when the physical separator is CRLF.
+  const nameLine = state.doc.line(2);
+
+  const from =
+    nameLine.from +
+    "    - name: ".length;
+
+  assert.equal(
+    state.sliceDoc(
+      from,
+      from + "Original".length
+    ),
+    "Original"
+  );
+
+  const transaction = state.update({
+    changes: {
+      from,
+      to: from + "Original".length,
+      insert: "Changed",
+    },
+  });
+
+  const expected =
+    original.replace("Original", "Changed");
+
+  assert.equal(
+    transaction.state.lineBreak,
+    "\r\n"
+  );
+
+  assert.equal(
+    editorTextFromState(transaction.state),
+    expected
+  );
+
+  assert.equal(
+    Buffer.from(
+      editorTextFromState(transaction.state),
+      "utf8"
+    ).equals(
+      Buffer.from(expected, "utf8")
+    ),
+    true
+  );
 });
 
 test("programmatic document replacement is not reported as a user edit", () => {
@@ -101,9 +254,22 @@ test("editor keydown isolation stops host propagation without claiming the key",
   }
 });
 
+test("read-only editor remains focusable for keyboard isolation", () => {
+  assert.deepEqual(
+    editorContentAttributes(true),
+    { tabindex: "0" }
+  );
+
+  assert.deepEqual(
+    editorContentAttributes(false),
+    {}
+  );
+});
+
 test("editor keydown handler uses CodeMirror event-view argument order", () => {
   let stopped = false;
   let viewStopCalled = false;
+
   const event = {
     key: "e",
     stopPropagation() {
@@ -113,10 +279,11 @@ test("editor keydown handler uses CodeMirror event-view argument order", () => {
       throw new Error("keydown isolation must not prevent default");
     },
   };
+
   const view = {
     stopPropagation() {
       viewStopCalled = true;
-      throw new Error("EditorView was used as the event");
+      throw new Error("EditorView was incorrectly treated as the event");
     },
   };
 

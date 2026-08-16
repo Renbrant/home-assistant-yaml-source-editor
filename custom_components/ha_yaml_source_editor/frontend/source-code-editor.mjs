@@ -33,8 +33,15 @@ export function createSourceCodeEditor({
   doc,
   onChange,
   onStatusChange,
+  readOnly = false,
 }) {
-  return new SourceCodeEditor({ parent, doc, onChange, onStatusChange });
+  return new SourceCodeEditor({
+    parent,
+    doc,
+    onChange,
+    onStatusChange,
+    readOnly,
+  });
 }
 
 export function editorStatusFromText(text, position = 0) {
@@ -60,6 +67,56 @@ export function editorTextFromDocument(text) {
   return text;
 }
 
+export function editorLineSeparatorFromText(text) {
+  const hasCRLF = text.includes("\r\n");
+  const withoutCRLF = text.replace(/\r\n/g, "");
+  const hasLF = withoutCRLF.includes("\n");
+  const hasCR = withoutCRLF.includes("\r");
+
+  if (hasCRLF && !hasLF && !hasCR) {
+    return "\r\n";
+  }
+
+  if (!hasCRLF && hasLF && !hasCR) {
+    return "\n";
+  }
+
+  if (!hasCRLF && !hasLF && hasCR) {
+    return "\r";
+  }
+
+  // No line breaks or mixed line-ending styles.
+  // Leave CodeMirror on its default behavior rather than incorrectly
+  // declaring one physical separator authoritative.
+  return null;
+}
+
+export function editorLineEndingLabelFromText(text) {
+  const separator = editorLineSeparatorFromText(text);
+
+  if (separator === "\r\n") {
+    return "CRLF";
+  }
+
+  if (separator === "\n") {
+    return "LF";
+  }
+
+  if (separator === "\r") {
+    return "CR";
+  }
+
+  if (text.includes("\r") || text.includes("\n")) {
+    return "Mixed";
+  }
+
+  return "No EOL";
+}
+
+export function editorTextFromState(state) {
+  return state.sliceDoc();
+}
+
 export function shouldNotifyEditorChange({ docChanged, programmaticUpdate }) {
   return Boolean(docChanged && !programmaticUpdate);
 }
@@ -71,6 +128,12 @@ export function stopHostKeydownPropagation(event) {
 
 export function handleSourceEditorKeydown(event, _view) {
   return stopHostKeydownPropagation(event);
+}
+
+export function editorContentAttributes(readOnly) {
+  return readOnly
+    ? { tabindex: "0" }
+    : {};
 }
 
 export function shouldRestoreEditorViewportSnapshot(
@@ -96,10 +159,19 @@ export function shouldRestoreEditorFocusSnapshot(
 }
 
 class SourceCodeEditor {
-  constructor({ parent, doc, onChange, onStatusChange }) {
+  constructor({
+    parent,
+    doc,
+    onChange,
+    onStatusChange,
+    readOnly = false,
+  }) {
     this._onChange = onChange;
     this._onStatusChange = onStatusChange;
     this._programmaticUpdate = false;
+    this._readOnly = Boolean(readOnly);
+    this._lineSeparator = editorLineSeparatorFromText(doc);
+    this._lineEndingLabel = editorLineEndingLabelFromText(doc);
     this._extensions = this._createExtensions();
 
     this.view = new EditorView({
@@ -115,6 +187,20 @@ class SourceCodeEditor {
 
   _createExtensions() {
     return [
+      ...(
+        this._lineSeparator
+          ? [
+              EditorState.lineSeparator.of(
+                this._lineSeparator
+              ),
+            ]
+          : []
+      ),
+      EditorState.readOnly.of(this._readOnly),
+      EditorView.editable.of(!this._readOnly),
+      EditorView.contentAttributes.of(
+        editorContentAttributes(this._readOnly)
+      ),
       lineNumbers(),
       highlightActiveLineGutter(),
       foldGutter(),
@@ -144,11 +230,19 @@ class SourceCodeEditor {
         ...defaultKeymap,
       ]),
       EditorView.updateListener.of((update) => {
+        if (update.docChanged && !this._programmaticUpdate) {
+          this._lineEndingLabel = editorLineEndingLabelFromText(
+            editorTextFromState(update.state)
+          );
+        }
+
         if (shouldNotifyEditorChange({
           docChanged: update.docChanged,
           programmaticUpdate: this._programmaticUpdate,
         })) {
-          this._onChange?.(update.state.doc.toString());
+          this._onChange?.(
+            editorTextFromState(update.state)
+          );
         }
 
         if (update.docChanged || update.selectionSet || update.focusChanged) {
@@ -187,7 +281,32 @@ class SourceCodeEditor {
   }
 
   getText() {
-    return this.view.state.doc.toString();
+    return editorTextFromState(this.view.state);
+  }
+
+  isReadOnly() {
+    return this._readOnly;
+  }
+
+  revealLine(lineNumber) {
+    const safeLine = Math.max(
+      1,
+      Math.min(
+        Number.isFinite(lineNumber) ? Math.trunc(lineNumber) : 1,
+        this.view.state.doc.lines
+      )
+    );
+
+    const line = this.view.state.doc.line(safeLine);
+
+    this.view.dispatch({
+      selection: { anchor: line.from },
+      effects: EditorView.scrollIntoView(line.from, {
+        y: "center",
+      }),
+    });
+
+    this._emitStatus(this.view.state);
   }
 
   status() {
@@ -197,6 +316,7 @@ class SourceCodeEditor {
       line: line.number,
       column: head - line.from + 1,
       lineCount: this.view.state.doc.lines,
+      lineEnding: this._lineEndingLabel,
     };
   }
 
@@ -205,7 +325,25 @@ class SourceCodeEditor {
   }
 
   replaceText(text, { resetHistory = false } = {}) {
-    if (resetHistory) {
+    const nextLineSeparator =
+      editorLineSeparatorFromText(text);
+    const nextLineEndingLabel =
+      editorLineEndingLabelFromText(text);
+
+    const lineSeparatorChanged =
+      nextLineSeparator !== this._lineSeparator;
+
+    this._lineEndingLabel = nextLineEndingLabel;
+
+    if (lineSeparatorChanged) {
+      this._lineSeparator = nextLineSeparator;
+      this._extensions = this._createExtensions();
+    }
+
+    const shouldResetHistory =
+      resetHistory || lineSeparatorChanged;
+
+    if (shouldResetHistory) {
       this._programmaticUpdate = true;
       this.view.setState(EditorState.create({
         doc: text,
@@ -241,6 +379,7 @@ class SourceCodeEditor {
       line: line.number,
       column: head - line.from + 1,
       lineCount: state.doc.lines,
+      lineEnding: this._lineEndingLabel,
     });
   }
 }

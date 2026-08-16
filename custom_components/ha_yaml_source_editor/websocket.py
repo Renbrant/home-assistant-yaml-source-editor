@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+
+from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
@@ -24,6 +26,11 @@ from .const import (
     WS_TYPE_DOCUMENTS_SAVE_SOURCE,
     WS_TYPE_HASH_SHA256,
     WS_TYPE_STATUS,
+    WS_TYPE_TEMPLATES_INDEX,
+    WS_TYPE_TEMPLATES_SOURCE_GET,
+    WS_TYPE_TEMPLATES_BLOCK_GET,
+    WS_TYPE_TEMPLATES_BLOCK_VALIDATE,
+    WS_TYPE_TEMPLATES_BLOCK_SAVE,
 )
 from .document_store import (
     DocumentAlreadyExistsError,
@@ -36,6 +43,24 @@ from .document_store import (
     SourceTextTooLargeError,
 )
 from .hashing import sha256_text
+from .template_navigator import (
+    TemplateBlockNotFoundError,
+    TemplateSourceChangedError,
+    TemplateSourceCommitUncertainError,
+    TemplateSourceError,
+    TemplateSourceTooLargeError,
+    TemplateSourceValidationError,
+    TemplateSourceWriteError,
+    build_template_index,
+    commit_prepared_template_block_save,
+    get_template_block,
+    get_template_source,
+    prepare_template_block_save,
+)
+from .template_validation import (
+    TemplateSemanticValidationError,
+    async_validate_prepared_template_save,
+)
 
 
 def async_register_commands(hass: HomeAssistant) -> None:
@@ -48,6 +73,12 @@ def async_register_commands(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, websocket_documents_record_deployment)
     websocket_api.async_register_command(hass, websocket_documents_import_ha_version)
     websocket_api.async_register_command(hass, websocket_hash_sha256)
+    websocket_api.async_register_command(hass, websocket_templates_index)
+    websocket_api.async_register_command(hass, websocket_templates_source_get)
+    websocket_api.async_register_command(hass, websocket_templates_block_get)
+    websocket_api.async_register_command(hass, websocket_templates_block_validate)
+    websocket_api.async_register_command(hass, websocket_templates_block_save)
+
 
 
 def _document_store(hass: HomeAssistant) -> SourceDocumentStore:
@@ -316,3 +347,334 @@ async def websocket_documents_import_ha_version(
         return
 
     connection.send_result(msg["id"], {"document": document})
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_SOURCE_GET,
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_source_get(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return the exact full configured Template Source snapshot."""
+    try:
+        result = await hass.async_add_executor_job(
+            get_template_source,
+            Path(hass.config.config_dir),
+            msg["expected_source_sha256"],
+        )
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateSourceTooLargeError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_too_large",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(
+        msg["id"],
+        result,
+    )
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_BLOCK_GET,
+        vol.Required("block_id"): vol.All(
+            str,
+            vol.Length(min=1, max=128),
+        ),
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_block_get(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return one exact raw Template block from the indexed Source snapshot."""
+    try:
+        result = await hass.async_add_executor_job(
+            get_template_block,
+            Path(hass.config.config_dir),
+            msg["block_id"],
+            msg["expected_source_sha256"],
+        )
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateBlockNotFoundError as err:
+        connection.send_error(
+            msg["id"],
+            "template_block_not_found",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(msg["id"], result)
+
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_BLOCK_VALIDATE,
+        vol.Required("block_id"): vol.All(
+            str,
+            vol.Length(min=1, max=128),
+        ),
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+        vol.Required("replacement_text"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_block_validate(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Validate one proposed Template block without writing the Source."""
+    try:
+        prepared = await hass.async_add_executor_job(
+            prepare_template_block_save,
+            Path(hass.config.config_dir),
+            msg["block_id"],
+            msg["expected_source_sha256"],
+            msg["replacement_text"],
+        )
+
+        await async_validate_prepared_template_save(
+            hass,
+            prepared,
+        )
+
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateBlockNotFoundError as err:
+        connection.send_error(
+            msg["id"],
+            "template_block_not_found",
+            str(err),
+        )
+        return
+    except TemplateSourceTooLargeError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_too_large",
+            str(err),
+        )
+        return
+    except TemplateSourceValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_structural_invalid",
+            str(err),
+        )
+        return
+    except TemplateSemanticValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_semantic_invalid",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(
+        msg["id"],
+        {
+            "valid": True,
+            "changed": prepared.changed,
+            "block_id": prepared.block_id,
+            "source_sha256": prepared.expected_source_sha256,
+        },
+    )
+
+
+
+@websocket_api.require_admin
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_TEMPLATES_BLOCK_SAVE,
+        vol.Required("block_id"): vol.All(
+            str,
+            vol.Length(min=1, max=128),
+        ),
+        vol.Required("expected_source_sha256"): vol.Match(
+            r"^[0-9a-f]{64}$"
+        ),
+        vol.Required("replacement_text"): str,
+    }
+)
+@websocket_api.async_response
+async def websocket_templates_block_save(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Semantically validate and atomically save one targeted Template block."""
+    try:
+        # Phase 1: rediscover the authoritative physical Source, verify the
+        # caller's snapshot, derive the backend-owned block range, perform
+        # the raw lossless splice, and structurally validate the candidate.
+        # This phase does not mutate the physical Source.
+        prepared = await hass.async_add_executor_job(
+            prepare_template_block_save,
+            Path(hass.config.config_dir),
+            msg["block_id"],
+            msg["expected_source_sha256"],
+            msg["replacement_text"],
+        )
+
+        # Phase 2: parse only the prepared complete candidate using Home
+        # Assistant's YAML loader and validate every Template section using
+        # the Template integration itself. The parsed representation is
+        # ephemeral and is never serialized back to disk.
+        await async_validate_prepared_template_save(
+            hass,
+            prepared,
+        )
+
+        # Phase 3: recheck the physical Source snapshot/path/metadata and
+        # atomically commit exactly the raw bytes that passed both validation
+        # barriers. Any Source change during validation aborts this commit.
+        result = await hass.async_add_executor_job(
+            commit_prepared_template_block_save,
+            prepared,
+        )
+
+    except TemplateSourceChangedError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_changed",
+            str(err),
+        )
+        return
+    except TemplateBlockNotFoundError as err:
+        connection.send_error(
+            msg["id"],
+            "template_block_not_found",
+            str(err),
+        )
+        return
+    except TemplateSourceTooLargeError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_too_large",
+            str(err),
+        )
+        return
+    except TemplateSourceValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_structural_invalid",
+            str(err),
+        )
+        return
+    except TemplateSemanticValidationError as err:
+        connection.send_error(
+            msg["id"],
+            "template_semantic_invalid",
+            str(err),
+        )
+        return
+    except TemplateSourceCommitUncertainError as err:
+        connection.send_error(
+            msg["id"],
+            "template_commit_uncertain",
+            str(err),
+        )
+        return
+    except TemplateSourceWriteError as err:
+        connection.send_error(
+            msg["id"],
+            "template_write_error",
+            str(err),
+        )
+        return
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(
+        msg["id"],
+        result,
+    )
+
+@websocket_api.require_admin
+@websocket_api.websocket_command({vol.Required("type"): WS_TYPE_TEMPLATES_INDEX})
+@websocket_api.async_response
+async def websocket_templates_index(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Return a read-only index of the configured YAML Template Source."""
+    try:
+        result = await hass.async_add_executor_job(
+            build_template_index,
+            Path(hass.config.config_dir),
+        )
+    except TemplateSourceError as err:
+        connection.send_error(
+            msg["id"],
+            "template_source_error",
+            str(err),
+        )
+        return
+
+    connection.send_result(msg["id"], result)

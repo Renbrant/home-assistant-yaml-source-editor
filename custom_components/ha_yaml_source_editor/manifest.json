@@ -1,6 +1,7 @@
 {
   "domain": "ha_yaml_source_editor",
   "name": "HA YAML Source Editor",
+  "after_dependencies": ["template"],
   "codeowners": ["@Renbrant"],
   "config_flow": true,
   "dependencies": ["frontend", "http", "panel_custom"],
@@ -9,5 +10,5 @@
   "iot_class": "calculated",
   "issue_tracker": "https://github.com/Renbrant/home-assistant-yaml-source-editor/issues",
   "single_config_entry": true,
-  "version": "0.2.2"
+  "version": "0.3.0"
 }
