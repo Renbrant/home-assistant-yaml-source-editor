@@ -30,6 +30,7 @@ test("manifest metadata is truthful for a custom integration service", async () 
   assert.equal(manifest.integration_type, "service");
   assert.equal(manifest.iot_class, "calculated");
   assert.deepEqual(manifest.dependencies, ["frontend", "http", "panel_custom"]);
+  assert.deepEqual(manifest.after_dependencies, ["template"]);
   assert.deepEqual(manifest.codeowners, ["@Renbrant"]);
 });
 
