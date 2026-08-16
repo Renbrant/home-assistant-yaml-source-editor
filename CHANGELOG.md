@@ -44,6 +44,7 @@ Template Navigator 26A and guarded physical Template Source editing release.
 - CodeMirror now configures a detected uniform LF, CRLF, or CR physical separator.
 - Editor text serialization uses `EditorState.sliceDoc()` so configured physical line
   separators survive edits.
+- Editor status now reports the detected line-ending mode instead of hard-coding `LF`.
 - Read-only Full Source remains keyboard-focusable while isolating Home Assistant global
   shortcuts.
 - Routine Home Assistant updates continue to preserve the active CodeMirror viewport

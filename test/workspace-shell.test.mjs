@@ -26,6 +26,14 @@ test("panel renders a workspace shell with explorer editor and inspector regions
   assert.match(panel, /aria-label="Editor"/);
   assert.match(panel, /class="workspace-region inspector-region"/);
   assert.match(panel, /aria-label="Inspector"/);
+  assert.match(
+    panel,
+    /\$\{this\._sourceEditorStatus\.lineEnding \?\? "No EOL"\}/
+  );
+  assert.doesNotMatch(
+    panel,
+    /YAML    LF    \$\{editorState\}/
+  );
 });
 
 test("panel exposes primary Source workflow commands inside the editor region", async () => {

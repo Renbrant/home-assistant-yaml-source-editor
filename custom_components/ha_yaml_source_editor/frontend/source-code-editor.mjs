@@ -91,6 +91,28 @@ export function editorLineSeparatorFromText(text) {
   return null;
 }
 
+export function editorLineEndingLabelFromText(text) {
+  const separator = editorLineSeparatorFromText(text);
+
+  if (separator === "\r\n") {
+    return "CRLF";
+  }
+
+  if (separator === "\n") {
+    return "LF";
+  }
+
+  if (separator === "\r") {
+    return "CR";
+  }
+
+  if (text.includes("\r") || text.includes("\n")) {
+    return "Mixed";
+  }
+
+  return "No EOL";
+}
+
 export function editorTextFromState(state) {
   return state.sliceDoc();
 }
@@ -149,6 +171,7 @@ class SourceCodeEditor {
     this._programmaticUpdate = false;
     this._readOnly = Boolean(readOnly);
     this._lineSeparator = editorLineSeparatorFromText(doc);
+    this._lineEndingLabel = editorLineEndingLabelFromText(doc);
     this._extensions = this._createExtensions();
 
     this.view = new EditorView({
@@ -207,6 +230,12 @@ class SourceCodeEditor {
         ...defaultKeymap,
       ]),
       EditorView.updateListener.of((update) => {
+        if (update.docChanged && !this._programmaticUpdate) {
+          this._lineEndingLabel = editorLineEndingLabelFromText(
+            editorTextFromState(update.state)
+          );
+        }
+
         if (shouldNotifyEditorChange({
           docChanged: update.docChanged,
           programmaticUpdate: this._programmaticUpdate,
@@ -287,6 +316,7 @@ class SourceCodeEditor {
       line: line.number,
       column: head - line.from + 1,
       lineCount: this.view.state.doc.lines,
+      lineEnding: this._lineEndingLabel,
     };
   }
 
@@ -297,9 +327,13 @@ class SourceCodeEditor {
   replaceText(text, { resetHistory = false } = {}) {
     const nextLineSeparator =
       editorLineSeparatorFromText(text);
+    const nextLineEndingLabel =
+      editorLineEndingLabelFromText(text);
 
     const lineSeparatorChanged =
       nextLineSeparator !== this._lineSeparator;
+
+    this._lineEndingLabel = nextLineEndingLabel;
 
     if (lineSeparatorChanged) {
       this._lineSeparator = nextLineSeparator;
@@ -345,6 +379,7 @@ class SourceCodeEditor {
       line: line.number,
       column: head - line.from + 1,
       lineCount: state.doc.lines,
+      lineEnding: this._lineEndingLabel,
     });
   }
 }

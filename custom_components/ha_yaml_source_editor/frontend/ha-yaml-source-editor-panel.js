@@ -107,7 +107,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
     this._sourceEditorReadOnly = null;
-    this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
+    this._sourceEditorStatus = {
+      line: 1,
+      column: 1,
+      lineCount: 1,
+      lineEnding: "No EOL",
+    };
     this._validationStatus = "Not validated";
     this._validationResult = null;
     this._validationError = null;
@@ -634,7 +639,12 @@ class HaYamlSourceEditorPanel extends HTMLElement {
     this._sourceEditor = null;
     this._sourceEditorDocumentId = null;
     this._sourceEditorReadOnly = null;
-    this._sourceEditorStatus = { line: 1, column: 1, lineCount: 1 };
+    this._sourceEditorStatus = {
+      line: 1,
+      column: 1,
+      lineCount: 1,
+      lineEnding: "No EOL",
+    };
   }
 
   _replaceSourceEditorText(
@@ -893,7 +903,7 @@ class HaYamlSourceEditorPanel extends HTMLElement {
           ? "Modified"
           : "Saved";
 
-    statusBar.textContent = `Ln ${this._sourceEditorStatus.line}, Col ${this._sourceEditorStatus.column}    ${this._sourceEditorStatus.lineCount} ${this._sourceEditorStatus.lineCount === 1 ? "line" : "lines"}    YAML    LF    ${editorState}`;
+    statusBar.textContent = `Ln ${this._sourceEditorStatus.line}, Col ${this._sourceEditorStatus.column}    ${this._sourceEditorStatus.lineCount} ${this._sourceEditorStatus.lineCount === 1 ? "line" : "lines"}    YAML    ${this._sourceEditorStatus.lineEnding ?? "No EOL"}    ${editorState}`;
   }
 
   _refreshSyncUi() {

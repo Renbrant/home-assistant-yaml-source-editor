@@ -7,6 +7,7 @@ import {
 
 import {
   editorContentAttributes,
+  editorLineEndingLabelFromText,
   editorLineSeparatorFromText,
   editorStatusFromText,
   editorTextFromDocument,
@@ -75,6 +76,41 @@ test("editor detects uniform physical line separators without guessing mixed fil
       "first\r\nsecond\nthird\r\n"
     ),
     null
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\r\nsecond\r\n"
+    ),
+    "CRLF"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\nsecond\n"
+    ),
+    "LF"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\rsecond\r"
+    ),
+    "CR"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "first\r\nsecond\nthird\r\n"
+    ),
+    "Mixed"
+  );
+
+  assert.equal(
+    editorLineEndingLabelFromText(
+      "single line"
+    ),
+    "No EOL"
   );
 });
 

@@ -111,8 +111,8 @@ Editor features include:
 - search and replace with `Ctrl+F`;
 - Tab / Shift+Tab indentation;
 - undo and redo with isolated history between Source Documents;
-- editor status information including line, column, line count, YAML mode, LF mode,
-  and Saved/Modified state.
+- editor status information including line, column, line count, YAML mode, detected
+  line-ending mode, and Saved/Modified state.
 
 These are editing conveniences only. The editor does **not** automatically rewrite your
 Source YAML.
