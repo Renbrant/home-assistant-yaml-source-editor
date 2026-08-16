@@ -63,9 +63,10 @@
 - [x] CHANGELOG v0.3.0 content reviewed.
 - [x] Known limitations match actual 26A scope and safety guarantees.
 - [x] Manifest and integration version are `0.3.0`.
-- [ ] HACS upgrade from v0.2.2 to v0.3.0 tested.
-- [ ] Final release candidate tested after a clean Home Assistant restart.
-- [ ] Final PR / issue #28 acceptance criteria reviewed.
+- [ ] Post-release HACS upgrade from v0.2.2 to v0.3.0 validation completed.
+  - Intentionally deferred until the final v0.3.0 release/tag exists so HACS can exercise the real user upgrade path.
+- [x] Final release candidate tested after a clean Home Assistant restart.
+- [x] Final PR / issue #28 acceptance criteria reviewed.
 - [ ] Merge the v0.3.0 development branch.
 - [ ] Create GitHub Release `v0.3.0`.
 
