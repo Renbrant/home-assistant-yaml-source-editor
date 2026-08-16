@@ -67,6 +67,34 @@ export function editorTextFromDocument(text) {
   return text;
 }
 
+export function editorLineSeparatorFromText(text) {
+  const hasCRLF = text.includes("\r\n");
+  const withoutCRLF = text.replace(/\r\n/g, "");
+  const hasLF = withoutCRLF.includes("\n");
+  const hasCR = withoutCRLF.includes("\r");
+
+  if (hasCRLF && !hasLF && !hasCR) {
+    return "\r\n";
+  }
+
+  if (!hasCRLF && hasLF && !hasCR) {
+    return "\n";
+  }
+
+  if (!hasCRLF && !hasLF && hasCR) {
+    return "\r";
+  }
+
+  // No line breaks or mixed line-ending styles.
+  // Leave CodeMirror on its default behavior rather than incorrectly
+  // declaring one physical separator authoritative.
+  return null;
+}
+
+export function editorTextFromState(state) {
+  return state.sliceDoc();
+}
+
 export function shouldNotifyEditorChange({ docChanged, programmaticUpdate }) {
   return Boolean(docChanged && !programmaticUpdate);
 }
@@ -120,6 +148,7 @@ class SourceCodeEditor {
     this._onStatusChange = onStatusChange;
     this._programmaticUpdate = false;
     this._readOnly = Boolean(readOnly);
+    this._lineSeparator = editorLineSeparatorFromText(doc);
     this._extensions = this._createExtensions();
 
     this.view = new EditorView({
@@ -135,6 +164,15 @@ class SourceCodeEditor {
 
   _createExtensions() {
     return [
+      ...(
+        this._lineSeparator
+          ? [
+              EditorState.lineSeparator.of(
+                this._lineSeparator
+              ),
+            ]
+          : []
+      ),
       EditorState.readOnly.of(this._readOnly),
       EditorView.editable.of(!this._readOnly),
       EditorView.contentAttributes.of(
@@ -173,7 +211,9 @@ class SourceCodeEditor {
           docChanged: update.docChanged,
           programmaticUpdate: this._programmaticUpdate,
         })) {
-          this._onChange?.(update.state.doc.toString());
+          this._onChange?.(
+            editorTextFromState(update.state)
+          );
         }
 
         if (update.docChanged || update.selectionSet || update.focusChanged) {
@@ -212,7 +252,7 @@ class SourceCodeEditor {
   }
 
   getText() {
-    return this.view.state.doc.toString();
+    return editorTextFromState(this.view.state);
   }
 
   isReadOnly() {
@@ -255,7 +295,21 @@ class SourceCodeEditor {
   }
 
   replaceText(text, { resetHistory = false } = {}) {
-    if (resetHistory) {
+    const nextLineSeparator =
+      editorLineSeparatorFromText(text);
+
+    const lineSeparatorChanged =
+      nextLineSeparator !== this._lineSeparator;
+
+    if (lineSeparatorChanged) {
+      this._lineSeparator = nextLineSeparator;
+      this._extensions = this._createExtensions();
+    }
+
+    const shouldResetHistory =
+      resetHistory || lineSeparatorChanged;
+
+    if (shouldResetHistory) {
       this._programmaticUpdate = true;
       this.view.setState(EditorState.create({
         doc: text,
